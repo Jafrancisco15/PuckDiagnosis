@@ -7,9 +7,9 @@
     <style>
       html, body, #root { height: 100%; margin: 0; }
       body { background: #0b0f17; color: #e6edf3; font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Helvetica Neue, Arial; }
-      .container { max-width: 1200px; margin: 0 auto; padding: 24px; }
+      .container { max-width: 1600px; margin: 0 auto; padding: 24px; }
       .card { background: rgba(255,255,255,0.06); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; padding: 20px; box-shadow: 0 10px 30px rgba(0,0,0,0.25); }
-      .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(340px, 1fr)); gap: 16px; }
+      .grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(520px, 1fr)); gap: 16px; }
       .drop { border: 2px dashed rgba(255,255,255,0.25); border-radius: 16px; padding: 24px; text-align: center; background: rgba(255,255,255,0.03); }
       .btn { background: #2563eb; color: white; padding: 10px 14px; border-radius: 12px; border: none; cursor: pointer; font-weight: 600; }
       .btn:disabled { opacity: .6; cursor: not-allowed; }
@@ -35,6 +35,10 @@
 .chart { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px; position: relative; overflow: hidden; }
 .chart img { display:block; width:100%; height:auto; position: relative; z-index: 0; }
       .chart { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px; }
+    
+      .sets { display: grid; grid-template-columns: repeat(auto-fit, minmax(720px, 1fr)); gap: 20px; }
+      @media (max-width: 920px){ .sets { grid-template-columns: 1fr; } }
+
     </style>
   </head>
   <body>
