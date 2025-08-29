@@ -33,3 +33,9 @@ Framework: **Vite** · Build: `npm run build` · Output: `dist/`
 - Clarificación de caras: **Superior (group head)** vs **Inferior (canasta)** en UI.
 - Detección de **anillo oscuro** (banda 78–96% del radio) con overlay y métrica `ringDepth`.
 - Inputs **opcionales** para **huella en papel** (superior e inferior).
+
+
+## v0.6 — Sectores coincidentes + PDF + centrado de huellas
+- **Marcado de sectores coincidentes** (rojo=oscuro/canales, cian=claro) en ambas caras.
+- **Exportar PDF** por set (jsPDF), con métricas y visuales.
+- **Centrado de huellas** en papel mejorado: ajuste de círculo (Kåsa) sobre el borde detectado.
