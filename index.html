@@ -19,8 +19,9 @@
       .card { background: var(--panel); border:1px solid var(--border); border-radius:14px; padding:14px; }
       .sets { display:grid; gap:16px; }
       .grid { display:grid; }
-      .thumb { background:#0b0f1a; border:1px solid var(--border); border-radius:12px; overflow:hidden; position:relative; aspect-ratio:1/1; }
-      .thumb img { width:100%; height:100%; object-fit:contain; display:block; }
+      .thumb { background:#0b0f1a; border:1px solid var(--border); border-radius:12px; overflow:hidden; position:relative; width:100%; }
+      .thumb::before { content:''; display:block; padding-top:100%; } /* square */
+      .thumb > img { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; display:block; }
       .canvas-stack .overlay { position:absolute; inset:0; pointer-events:none; }
       .metrics { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:8px; margin:6px 0 4px; }
       .charts { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
@@ -37,9 +38,10 @@
       .slider{display:flex;align-items:center;gap:8px;margin-bottom:8px}
       .slider input{width:100%}
       .accordion-summary{display:flex;align-items:center;justify-content:space-between;gap:10px;cursor:pointer}
-      .summary-metrics{display:flex;gap:14px;font-variant-numeric:tabular-nums}
+      .summary-metrics{display:flex;gap:14px;font-variant-numeric:tabular-nums; flex-wrap:wrap }
       .chev{transition:transform .2s ease}
       .chev.open{transform:rotate(90deg)}
+      .pill { padding:2px 8px; border-radius:999px; background:rgba(255,255,255,.06); border:1px solid var(--border) }
     </style>
   </head>
   <body>
