@@ -1,10 +1,11 @@
-# Puck Diagnosis v0.7 (lite)
+# Puck Diagnosis v0.7.1
 
-App React + Vite.
+Corrección de build en Vercel (duplicado canvasToURL) y fix menor en cálculo de 'extremos'.
 
-## Desarrollo
+## Scripts
 
 ```
 npm i
+npm run build
 npm run dev
 ```
