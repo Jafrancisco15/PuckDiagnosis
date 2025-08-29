@@ -300,7 +300,6 @@ function drawHistogram(gray, width, height, cx, cy, r){
   ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Histograma de intensidades (puck)",10,16);
   return can;
 }
-async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
 function corrPearson(a,b){
   const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
   for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
@@ -367,7 +366,7 @@ function headspaceRisk(metricsTop){
   const score = clamp01( 0.6*(depth/0.06)*edgePos + 0.25*edge*3 + 0.15*extremes*2 );
   return score;
 }
-async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
+async function canvasToURL
 
 async function detectCircleFromFile(file){
   const img = await fileToImageBitmap(file);
@@ -407,7 +406,7 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
     metrics: {
       eci: stats.eci,
       extremes: (()=>{ let s=0,c=0;
-        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x=centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; } }
+        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x-centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; } }
         const mean=s/Math.max(c,1);
         let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x-centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); } }
         const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
