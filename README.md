@@ -1,11 +1,10 @@
-# Puck Diagnosis v0.7.1
+# Puck Diagnosis v0.7.2
 
-Corrección de build en Vercel (duplicado canvasToURL) y fix menor en cálculo de 'extremos'.
+Fix: build estable (una sola `canvasToURL`) y corrección del cálculo de extremos.
 
-## Scripts
-
+## Uso
 ```
 npm i
-npm run build
 npm run dev
+npm run build
 ```
