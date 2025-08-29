@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 
+/** =================== Utils =================== */
 const MAX_DIM = 1024;
 const clamp01 = x => Math.min(1, Math.max(0, x));
 const lerp = (a,b,t)=> a+(b-a)*t;
@@ -300,74 +301,69 @@ function drawHistogram(gray, width, height, cx, cy, r){
   ctx.fillStyle="rgba(255,255,255,0.8)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Histograma de intensidades (puck)",10,16);
   return can;
 }
-function corrPearson(a,b){
-  const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
-  for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
-  const cov=sxy/n - (sx/n)*(sy/n); const vx=sxx/n - (sx/n)*(sx/n); const vy=syy/n - (sy/n)*(sy/n);
-  const denom=Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12)); return denom>0? cov/denom : 0;
-}
-function alignSectorMeans(a,b,allowReverse=true){
-  const n=a.length; let best={corr:-2,shift:0,reversed:false,aligned:null};
-  const shiftArr=(arr,k)=>arr.map((_,i)=>arr[(i-k+n)%n]);
-  const variants=[{arr:b,reversed:false}]; if (allowReverse) variants.push({arr:[...b].reverse(),reversed:true});
-  for (const v of variants){ for (let k=0;k<n;k++){ const bb=shiftArr(v.arr,k); const c=corrPearson(a,bb); if (c>best.corr) best={corr:c,shift:k,reversed:v.reversed,aligned:bb}; } }
-  return best;
-}
-function zScore(arr){ const n=arr.length; let s=0,s2=0; for (let i=0;i<n;i++){ s+=arr[i]; s2+=arr[i]*arr[i]; } const mean=s/n; const std=Math.sqrt(Math.max(s2/n-mean*mean,1e-8)); return {mean,std,z:arr.map(v=>(v-mean)/(std||1))}; }
+async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
 
-function boxBlur1D(arr, w, h, r, horiz){
-  const out=new Float32Array(arr.length); const R=Math.max(1, Math.floor(r));
-  if (horiz){
-    for (let y=0;y<h;y++){
-      let s=0; for (let x=-R;x<=R;x++){ const xx=Math.min(w-1, Math.max(0,x)); s+=arr[y*w+xx]; }
-      for (let x=0;x<w;x++){
-        const i=y*w+x;
-        out[i]=s/(2*R+1);
-        const x0=x-R, x1=x+R+1;
-        s += arr[y*w + Math.min(w-1, x1)] - arr[y*w + Math.max(0, x0)];
-      }
-    }
-  } else {
-    for (let x=0;x<w;x++){
-      let s=0; for (let y=-R;y<=R;y++){ const yy=Math.min(h-1, Math.max(0,y)); s+=arr[yy*w+x]; }
-      for (let y=0;y<h;y++){
-        const i=y*w+x;
-        out[i]=s/(2*R+1);
-        const y0=y-R, y1=y+R+1;
-        s += arr[Math.min(h-1, y1)*w + x] - arr[Math.max(0, y0)*w + x];
-      }
-    }
-  }
-  return out;
-}
-function blur(arr, w, h, r, it=2){
-  let tmp=arr;
-  for (let k=0;k<it;k++){ tmp=boxBlur1D(tmp,w,h,r,true); tmp=boxBlur1D(tmp,w,h,r,false); }
-  return tmp;
-}
-function granularityMetrics(gray, width, height, cx, cy, r){
-  const L = new Float32Array(gray.length); for (let i=0;i<L.length;i++) L[i]=gray[i];
-  const b1=blur(L,width,height,1.5,1); // fino
-  const b2=blur(L,width,height,5,2);   // grueso
-  let E_f=0,E_c=0,area=0;
-  for (let y=0;y<height;y++) for (let x=0;x<width;x++){
-    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r*r){ const i=y*width+x; const hf=L[i]-b1[i]; const lf=b1[i]-b2[i]; E_f += hf*hf; E_c += lf*lf; area++; }
-  }
-  E_f/=Math.max(area,1); E_c/=Math.max(area,1);
-  const BI = E_c/(E_f+1e-6); // bimodalidad
-  return { fines:E_f, coarse:E_c, bimodality:BI };
-}
-function headspaceRisk(metricsTop){
-  const depth = Math.max(0, metricsTop.ringDepth);
-  const pos = metricsTop.ringPos || 0;
-  const edge = metricsTop.edgeDensity || 0;
-  const extremes = metricsTop.extremes || 0;
-  const edgePos = clamp01((pos-0.9)/0.08);
-  const score = clamp01( 0.6*(depth/0.06)*edgePos + 0.25*edge*3 + 0.15*extremes*2 );
-  return score;
-}
-async function canvasToURL
+/** =================== Analysis =================== */
+async function analyzeFromCircle(srcCanvas, cx, cy, r){
+  const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
+  const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
+  const cg = grayscale(cid);
+  const centerX = cropped.width/2, centerY = cropped.height/2;
 
+  const stats = polarStats(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const lv = localVariance(cg.gray, cg.width, cg.height, centerX, centerY, r, 64);
+  const edges = drawEdgesOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const sectors = drawSectorsOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r, 24);
+  const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
+  const guides = (()=>{ const can=document.createElement("canvas"); can.width=cropped.width; can.height=cropped.height; const ctx=can.getContext("2d"); ctx.strokeStyle="rgba(255,255,255,0.45)"; ctx.lineWidth=1.2; const rings=[0.3,0.6,0.9]; const Cx=cropped.width/2, Cy=cropped.height/2; rings.forEach(t=>{ ctx.beginPath(); ctx.arc(Cx,Cy,r*t,0,Math.PI*2); ctx.stroke(); }); return can; })();
+
+  const ring = detectDarkRing(stats.profile, [0.78,0.96]);
+  const ringDepth = (stats.mid - ring.minV);
+  const ringOverlay = drawRingOverlay(cropped.width, r, ring.pos, 0.06);
+
+  const profileChart = drawProfileChart(Array.from(stats.profile));
+  const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
+
+  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
+    canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
+    canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
+    canvasToURL(profileChart), canvasToURL(histChart)
+  ]);
+
+  return {
+    dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
+    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL },
+    metrics: {
+      eci: stats.eci,
+      extremes: (()=>{
+        let s=0,c=0;
+        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+          const dx=x-centerX, dy=y-centerY;
+          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; }
+        }
+        const mean=s/Math.max(c,1);
+        let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+          const dx=x-centerX, dy=y-centerY;
+          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); }
+        }
+        const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
+        const low=mean-1.0*std, high=mean+1.0*std; let ext=0;
+        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+          const dx=x-centerX, dy=y-centerY;
+          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; if (g<low||g>high) ext++; }
+        }
+        return ext/Math.max(c,1);
+      })(),
+      sectorStd: sectors.std,
+      edgeDensity: edges.density,
+      ringDepth, ringPos: ring.pos,
+    },
+    arrays: { sectorMeans: sectors.means, radialProfile: stats.profile },
+    debug: { cx, cy, r }
+  };
+}
+
+/** =================== Manual Adjust Modal =================== */
 async function detectCircleFromFile(file){
   const img = await fileToImageBitmap(file);
   const { canvas } = drawToCanvas(img, MAX_DIM);
@@ -378,52 +374,6 @@ async function detectCircleFromFile(file){
   const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
   return { src: canvas, width: canvas.width, height: canvas.height, cx: c.cx, cy: c.cy, r };
 }
-async function analyzeFromCircle(srcCanvas, cx, cy, r){
-  const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
-  const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
-  const cg = grayscale(cid);
-  const centerX = cropped.width/2, centerY = cropped.height/2;
-  const stats = polarStats(cg.gray, cg.width, cg.height, centerX, centerY, r);
-  const lv = localVariance(cg.gray, cg.width, cg.height, centerX, centerY, r, 64);
-  const edges = drawEdgesOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r);
-  const sectors = drawSectorsOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r, 24);
-  const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
-  const guides = (()=>{ const can=document.createElement("canvas"); can.width=cropped.width; can.height=cropped.height; const ctx=can.getContext("2d"); ctx.strokeStyle="rgba(255,255,255,0.45)"; ctx.lineWidth=1.2; const rings=[0.3,0.6,0.9]; const Cx=cropped.width/2, Cy=cropped.height/2; rings.forEach(t=>{ ctx.beginPath(); ctx.arc(Cx,Cy,r*t,0,Math.PI*2); ctx.stroke(); }); return can; })();
-  const ring = detectDarkRing(stats.profile, [0.78,0.96]);
-  const ringDepth = (stats.mid - ring.minV);
-  const ringOverlay = drawRingOverlay(cropped.width, r, ring.pos, 0.06);
-  const profileChart = drawProfileChart(Array.from(stats.profile));
-  const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
-  const gran = granularityMetrics(cg.gray, cg.width, cg.height, centerX, centerY, r);
-  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
-    canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
-    canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
-    canvasToURL(profileChart), canvasToURL(histChart)
-  ]);
-  return {
-    dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
-    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL },
-    metrics: {
-      eci: stats.eci,
-      extremes: (()=>{ let s=0,c=0;
-        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x-centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; } }
-        const mean=s/Math.max(c,1);
-        let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x-centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); } }
-        const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
-        const low=mean-1.0*std, high=mean+1.0*std; let ext=0;
-        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){ const dx=x-centerX, dy=y-centerY; if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; if (g<low||g>high) ext++; } }
-        return ext/Math.max(c,1);
-      })(),
-      sectorStd: sectors.std,
-      edgeDensity: edges.density,
-      ringDepth, ringPos: ring.pos,
-      granularity: gran
-    },
-    arrays: { sectorMeans: sectors.means, radialProfile: stats.profile },
-    debug: { cx, cy, r }
-  };
-}
-
 function AdjustModal({open, onClose, file, label, onConfirm}){
   const canvasRef = useRef(null);
   const [raw, setRaw] = useState(null);
@@ -477,7 +427,7 @@ function AdjustModal({open, onClose, file, label, onConfirm}){
                 <div className="slider"><span className="small">X</span><input type="range" min={0.0} max={1.0} step={0.001} value={cx} onChange={e=>setCx(parseFloat(e.target.value))}/></div>
                 <div className="slider"><span className="small">Y</span><input type="range" min={0.0} max={1.0} step={0.001} value={cy} onChange={e=>setCy(parseFloat(e.target.value))}/></div>
                 <div className="slider"><span className="small">R</span><input type="range" min={0.2} max={0.49} step={0.001} value={rad} onChange={e=>setRad(parseFloat(e.target.value))}/></div>
-                <div className="muted small">Tip: mueve X/Y para centrar el círculo; ajusta R hasta el borde.</div>
+                <div className="muted small">Tip: mueve X/Y para centrar; ajusta R hasta el borde.</div>
               </div>
             </div>
           )}
@@ -495,23 +445,17 @@ function AdjustModal({open, onClose, file, label, onConfirm}){
   );
 }
 
+/** =================== App =================== */
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true, coinc:false });
-  const [expanded, setExpanded] = useState(null);
-
+  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true });
   const topRef = useRef(); const bottomRef = useRef();
-  const topPrintRef = useRef(); const bottomPrintRef = useRef();
-
   const [adj, setAdj] = useState({ open:false, slot:null, file:null });
   const overrides = useRef({});
 
   function openAdjust(slot){
-    const file = slot==="top" ? topRef.current.files?.[0]
-              : slot==="bottom" ? bottomRef.current.files?.[0]
-              : slot==="topPrint" ? topPrintRef.current.files?.[0]
-              : bottomPrintRef.current.files?.[0];
+    const file = slot==="top" ? topRef.current.files?.[0] : bottomRef.current.files?.[0];
     if (!file){ alert("Primero selecciona un archivo."); return; }
     setAdj({ open:true, slot, file });
   }
@@ -536,21 +480,15 @@ export default function App(){
       }
       const bottomRaw = await analyzeFromCircle(bottomCrop.srcCanvas, bottomCrop.cx, bottomCrop.cy, bottomCrop.r);
 
-      // Simple correlation (no highlight drawing here to keep code manageable)
-      const a = Array.from(top.arrays.sectorMeans);
-      const b = Array.from(bottomRaw.arrays.sectorMeans);
-      const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
-      for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
-      const cov=sxy/n - (sx/n)*(sy/n); const vx=sxx/n - (sx/n)*(sx/n); const vy=syy/n - (sy/n)*(sy/n);
-      const corr = (Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12))>0)? cov/Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12)) : 0;
-
       const setItem = {
-        top, bottom: bottomRaw, pair: { sectorCorr: (corr+1)/2 },
-        summary: { eciTop: round(top.metrics.eci), eciBot: round(bottomRaw.metrics.eci), corr: Math.round(((corr+1)/2)*100), ring: bottomRaw.metrics.ringDepth>0.02 ? "anillo" : "—", grind: round(top.metrics.granularity.bimodality) },
-        rec: { lines: [], bullets: ["Revisa WDT / nivelación.", "Si hay anillo inferior, considera papel abajo."] }
+        top, bottom: bottomRaw,
+        summary: {
+          eciTop: round(top.metrics.eci),
+          eciBot: round(bottomRaw.metrics.eci),
+          ring: bottomRaw.metrics.ringDepth>0.02 ? "anillo" : "—"
+        }
       };
       setSets(prev=> [setItem, ...prev]);
-      setExpanded(0);
       if (topRef.current) topRef.current.value=null;
       if (bottomRef.current) bottomRef.current.value=null;
       overrides.current={};
@@ -607,15 +545,12 @@ export default function App(){
       <div className="sets">
         {sets.map((st, idx)=>{
           const displayIndex = sets.length - idx;
-          const isOpen = (idx===0);
           return (
             <div key={idx} className="card">
               <div className="row" style={{justifyContent:"space-between"}}>
                 <div style={{fontWeight:600}}>Puck #{displayIndex}</div>
                 <div className="summary-metrics small">
                   <div>ECI sup/inf: <span className="mono">{st.summary.eciTop}</span>/<span className="mono">{st.summary.eciBot}</span></div>
-                  <div>Corr: <span className="mono">{st.summary.corr}%</span></div>
-                  <div>Granul.: <span className="mono">{st.summary.grind}</span></div>
                   <div>Anillo: <span className="mono">{st.summary.ring}</span></div>
                 </div>
               </div>
@@ -630,6 +565,18 @@ export default function App(){
                       {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
                       {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
                       {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
+                    </div>
+                    <div style={{height:8}} />
+                    <div className="metrics">
+                      <div>ECI: <span className="mono">{st.top.metrics.eci.toFixed(3)}</span></div>
+                      <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
+                      <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                      <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
+                      <div>Anillo (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
+                    </div>
+                    <div className="charts">
+                      <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                      <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
                     </div>
                   </div>
                 ))}
