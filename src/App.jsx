@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 
 /** =================== Utils =================== */
-const MAX_DIM = 1024;
+const MAX_DIM = 1200;
 const clamp01 = x => Math.min(1, Math.max(0, x));
 const lerp = (a,b,t)=> a+(b-a)*t;
 const toGray = (r,g,b)=> (0.2126*r + 0.7152*g + 0.0722*b)/255;
@@ -278,7 +278,7 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   return { can, means, globalMean, std };
 }
 function drawProfileChart(profile){
-  const W=520, H=150, pad=8;
+  const W=720, H=190, pad=8;
   const can=document.createElement("canvas"); can.width=W; can.height=H;
   const ctx=can.getContext("2d");
   ctx.fillStyle="rgba(255,255,255,0.05)"; ctx.fillRect(0,0,W,H);
@@ -292,9 +292,9 @@ function drawProfileChart(profile){
   return can;
 }
 function drawHistogram(gray, width, height, cx, cy, r){
-  const bins=32; const hist=new Uint32Array(bins);
+  const bins=40; const hist=new Uint32Array(bins);
   for (let y=0;y<height;y++) for (let x=0;x<width;x++){ const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r*r){ const g=gray[y*width+x]; const b=Math.max(0, Math.min(bins-1, Math.floor(g*bins))); hist[b]++; }}
-  const W=520, H=150, pad=8; const can=document.createElement("canvas"); can.width=W; can.height=H; const ctx=can.getContext("2d");
+  const W=720, H=190, pad=8; const can=document.createElement("canvas"); can.width=W; can.height=H; const ctx=can.getContext("2d");
   ctx.fillStyle="rgba(255,255,255,0.05)"; ctx.fillRect(0,0,W,H);
   const maxv=Math.max(...hist); const bw=(W-2*pad)/bins; ctx.fillStyle="#22c55e";
   for (let i=0;i<bins;i++){ const h=(H-2*pad)*(hist[i]/(maxv||1)); ctx.fillRect(pad+i*bw, H-pad-h, Math.max(1,bw-1), h); }
@@ -303,7 +303,73 @@ function drawHistogram(gray, width, height, cx, cy, r){
 }
 async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
 
-/** =================== Analysis =================== */
+// Extra: granularidad de molienda (fino vs grueso) y headspace heurístico
+function boxBlur1D(arr, w, h, r, horiz){
+  const out=new Float32Array(arr.length); const R=Math.max(1, Math.floor(r));
+  if (horiz){
+    for (let y=0;y<h;y++){
+      let s=0; for (let x=-R;x<=R;x++){ const xx=Math.min(w-1, Math.max(0,x)); s+=arr[y*w+xx]; }
+      for (let x=0;x<w;x++){
+        const i=y*w+x;
+        out[i]=s/(2*R+1);
+        const x0=x-R, x1=x+R+1;
+        s += arr[y*w + Math.min(w-1, x1)] - arr[y*w + Math.max(0, x0)];
+      }
+    }
+  } else {
+    for (let x=0;x<w;x++){
+      let s=0; for (let y=-R;y<=R;y++){ const yy=Math.min(h-1, Math.max(0,y)); s+=arr[yy*w+x]; }
+      for (let y=0;y<h;y++){
+        const i=y*w+x;
+        out[i]=s/(2*R+1);
+        const y0=y-R, y1=y+R+1;
+        s += arr[Math.min(h-1, y1)*w + x] - arr[Math.max(0, y0)*w + x];
+      }
+    }
+  }
+  return out;
+}
+function blur(arr, w, h, r, it=2){
+  let tmp=arr;
+  for (let k=0;k<it;k++){ tmp=boxBlur1D(tmp,w,h,r,true); tmp=boxBlur1D(tmp,w,h,r,false); }
+  return tmp;
+}
+function granularityMetrics(gray, width, height, cx, cy, r){
+  const L = new Float32Array(gray.length); for (let i=0;i<L.length;i++) L[i]=gray[i];
+  const b1=blur(L,width,height,1.5,1); // fino
+  const b2=blur(L,width,height,5,2);   // grueso
+  let E_f=0,E_c=0,area=0;
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++){
+    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r*r){ const i=y*width+x; const hf=L[i]-b1[i]; const lf=b1[i]-b2[i]; E_f += hf*hf; E_c += lf*lf; area++; }
+  }
+  E_f/=Math.max(area,1); E_c/=Math.max(area,1);
+  const BI = E_c/(E_f+1e-6); // bimodalidad
+  return { fines:E_f, coarse:E_c, bimodality:BI };
+}
+function headspaceRisk(m){
+  const depth = Math.max(0, m.ringDepth);
+  const pos = m.ringPos || 0;
+  const edge = m.edgeDensity || 0;
+  const extremes = m.extremes || 0;
+  const edgePos = clamp01((pos-0.9)/0.08);
+  const score = clamp01( 0.6*(depth/0.06)*edgePos + 0.25*edge*3 + 0.15*extremes*2 );
+  return score;
+}
+function corrPearson(a,b){
+  const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
+  for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
+  const cov=sxy/n - (sx/n)*(sy/n); const vx=sxx/n - (sx/n)*(sx/n); const vy=syy/n - (sy/n)*(sy/n);
+  const denom=Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12)); return denom>0? cov/denom : 0;
+}
+function alignSectorMeans(a,b,allowReverse=true){
+  const n=a.length; let best={corr:-2,shift:0,reversed:false,aligned:null};
+  const shiftArr=(arr,k)=>arr.map((_,i)=>arr[(i-k+n)%n]);
+  const variants=[{arr:b,reversed:false}]; if (allowReverse) variants.push({arr:[...b].reverse(),reversed:true});
+  for (const v of variants){ for (let k=0;k<n;k++){ const bb=shiftArr(v.arr,k); const c=corrPearson(a,bb); if (c>best.corr) best={corr:c,shift:k,reversed:v.reversed,aligned:bb}; } }
+  return best;
+}
+
+/** =================== Analysis (puck) =================== */
 async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
   const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
@@ -324,6 +390,28 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const profileChart = drawProfileChart(Array.from(stats.profile));
   const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
+  const gran = granularityMetrics(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const hsRisk = headspaceRisk({ ringDepth, ringPos: ring.pos, edgeDensity: edges.density, extremes: 0 }); // extremos se calcula abajo
+
+  // extremos (pixeles fuera de 1σ) dentro del disco
+  let s=0,c=0;
+  for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+    const dx=x-centerX, dy=y-centerY;
+    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; }
+  }
+  const mean=s/Math.max(c,1);
+  let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+    const dx=x-centerX, dy=y-centerY;
+    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); }
+  }
+  const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
+  const low=mean-1.0*std, high=mean+1.0*std; let ext=0;
+  for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
+    const dx=x-centerX, dy=y-centerY;
+    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; if (g<low||g>high) ext++; }
+  }
+  const extremes = ext/Math.max(c,1);
+
   const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
     canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
     canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
@@ -335,129 +423,159 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
     urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL },
     metrics: {
       eci: stats.eci,
-      extremes: (()=>{
-        let s=0,c=0;
-        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-          const dx=x-centerX, dy=y-centerY;
-          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; }
-        }
-        const mean=s/Math.max(c,1);
-        let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-          const dx=x-centerX, dy=y-centerY;
-          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); }
-        }
-        const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
-        const low=mean-1.0*std, high=mean+1.0*std; let ext=0;
-        for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-          const dx=x-centerX, dy=y-centerY;
-          if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; if (g<low||g>high) ext++; }
-        }
-        return ext/Math.max(c,1);
-      })(),
+      extremes,
       sectorStd: sectors.std,
       edgeDensity: edges.density,
       ringDepth, ringPos: ring.pos,
+      granularity: gran,
+      headspace: hsRisk,
     },
     arrays: { sectorMeans: sectors.means, radialProfile: stats.profile },
     debug: { cx, cy, r }
   };
 }
 
-/** =================== Manual Adjust Modal =================== */
-async function detectCircleFromFile(file){
-  const img = await fileToImageBitmap(file);
-  const { canvas } = drawToCanvas(img, MAX_DIM);
-  const id = getImageData(canvas);
+/** =================== Optional: Paper print (huella) =================== */
+async function analyzePrintFromCircle(srcCanvas, cx, cy, r){
+  // Similar pipeline pero interpretando la mancha: más oscuro = más flujo (inversión)
+  const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
+  const id = cropped.getContext("2d").getImageData(0,0,cropped.width,cropped.height);
   const g = grayscale(id);
-  const m = darkMask(g, 0.35);
-  const c = centroid(m.mask, m.width, m.height);
-  const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
-  return { src: canvas, width: canvas.width, height: canvas.height, cx: c.cx, cy: c.cy, r };
+  // invertir para que alto = más flujo
+  const inv = new Float32Array(g.gray.length);
+  for (let i=0;i<inv.length;i++) inv[i] = 1.0 - g.gray[i];
+
+  const cx0=cropped.width/2, cy0=cropped.height/2;
+  // Stats angulares y radiales
+  const ps = polarStats(inv, g.width, g.height, cx0, cy0, r);
+  const lv = localVariance(inv, g.width, g.height, cx0, cy0, r, 64);
+  const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, g.width, g.height);
+  const sectors = drawSectorsOverlay(inv, g.width, g.height, cx0, cy0, r, 24);
+  const guides = (()=>{ const can=document.createElement("canvas"); can.width=cropped.width; can.height=cropped.height; const ctx=can.getContext("2d"); ctx.strokeStyle="rgba(255,255,255,0.45)"; ctx.lineWidth=1.2; const rings=[0.3,0.6,0.9]; rings.forEach(t=>{ ctx.beginPath(); ctx.arc(cx0,cy0,r*t,0,Math.PI*2); ctx.stroke(); }); return can; })();
+
+  // canales: top-percentil sobre media
+  const means = sectors.means;
+  const mAvg = means.reduce((a,b)=>a+b,0)/means.length;
+  const chMask = means.map(v=> v > mAvg + sectors.std*0.8 ? 1 : 0);
+  const channelPct = chMask.reduce((a,b)=>a+b,0)/chMask.length;
+
+  const profileChart = drawProfileChart(Array.from(ps.profile));
+  const histChart = drawHistogram(inv, g.width, g.height, cx0, cy0, r);
+
+  const [croppedURL, hmURL, sectorURL, guideURL, profileURL, histURL] = await Promise.all([
+    canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(sectors.can),
+    canvasToURL(guides), canvasToURL(profileChart), canvasToURL(histChart)
+  ]);
+
+  return {
+    urls:{ croppedURL, hmURL, sectorURL, guideURL, profileURL, histURL },
+    metrics:{
+      channelPct,
+      sectorStd: sectors.std,
+      radialEdgeBoost: ps.ringAvg(0.88,0.98) - ps.ringAvg(0.55,0.7) // borde vs medio
+    },
+    arrays:{ sectorMeans: sectors.means, radialProfile: ps.profile }
+  };
 }
-function AdjustModal({open, onClose, file, label, onConfirm}){
-  const canvasRef = useRef(null);
-  const [raw, setRaw] = useState(null);
-  const [cx, setCx] = useState(0.5);
-  const [cy, setCy] = useState(0.5);
-  const [rad, setRad] = useState(0.45);
 
-  useEffect(()=>{
-    if(!open || !file) return;
-    (async()=>{
-      const det = await detectCircleFromFile(file);
-      setRaw(det);
-      setCx(det.cx/det.width);
-      setCy(det.cy/det.height);
-      const rRel = det.r / Math.min(det.width, det.height);
-      setRad(Math.min(0.49, rRel));
-    })();
-  }, [open, file]);
-
-  useEffect(()=>{
-    if (!raw || !open) return;
-    const can = canvasRef.current;
-    can.width = raw.width; can.height = raw.height;
-    const ctx = can.getContext("2d");
-    ctx.clearRect(0,0,can.width,can.height);
-    ctx.drawImage(raw.src, 0, 0);
-    const rpx = rad * Math.min(raw.width, raw.height);
-    const px = cx * raw.width, py = cy * raw.height;
-    ctx.save();
-    ctx.strokeStyle = "rgba(59,130,246,0.9)";
-    ctx.lineWidth = 2;
-    ctx.beginPath(); ctx.arc(px, py, rpx, 0, Math.PI*2); ctx.stroke();
-    ctx.restore();
-  }, [raw, cx, cy, rad, open]);
-
-  if (!open) return null;
-  return (
-    <div className="modal-backdrop" onClick={onClose}>
-      <div className="modal" onClick={e=>e.stopPropagation()}>
-        <header>
-          <div style={{fontWeight:700}}>Ajustar recorte — {label}</div>
-          <button className="btn" onClick={onClose}>Cerrar</button>
-        </header>
-        <div className="body">
-          {!raw ? <div className="muted">Cargando...</div> : (
-            <div className="preview">
-              <div className="preview-canvas">
-                <canvas ref={canvasRef} style={{width:"100%",height:"100%"}} />
-              </div>
-              <div>
-                <div className="slider"><span className="small">X</span><input type="range" min={0.0} max={1.0} step={0.001} value={cx} onChange={e=>setCx(parseFloat(e.target.value))}/></div>
-                <div className="slider"><span className="small">Y</span><input type="range" min={0.0} max={1.0} step={0.001} value={cy} onChange={e=>setCy(parseFloat(e.target.value))}/></div>
-                <div className="slider"><span className="small">R</span><input type="range" min={0.2} max={0.49} step={0.001} value={rad} onChange={e=>setRad(parseFloat(e.target.value))}/></div>
-                <div className="muted small">Tip: mueve X/Y para centrar; ajusta R hasta el borde.</div>
-              </div>
-            </div>
-          )}
-        </div>
-        <div className="footer">
-          <button className="btn" onClick={()=>{
-            if(!raw) return;
-            const Rpx = rad * Math.min(raw.width, raw.height);
-            onConfirm({ srcCanvas: raw.src, cx: cx*raw.width, cy: cy*raw.height, r: Rpx });
-            onClose();
-          }}>Usar este recorte</button>
-        </div>
-      </div>
-    </div>
-  );
-}
+/** =================== UI helpers =================== */
+function Pill({children}){ return <span className="pill">{children}</span>; }
 
 /** =================== App =================== */
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
   const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true });
+  const [expanded, setExpanded] = useState(0);
+
   const topRef = useRef(); const bottomRef = useRef();
+  const topPrintRef = useRef(); const bottomPrintRef = useRef();
+
   const [adj, setAdj] = useState({ open:false, slot:null, file:null });
   const overrides = useRef({});
 
   function openAdjust(slot){
-    const file = slot==="top" ? topRef.current.files?.[0] : bottomRef.current.files?.[0];
+    const map = { top: topRef, bottom: bottomRef, topPrint: topPrintRef, bottomPrint: bottomPrintRef };
+    const file = map[slot].current?.files?.[0];
     if (!file){ alert("Primero selecciona un archivo."); return; }
     setAdj({ open:true, slot, file });
+  }
+
+  function AdjustModal({open, onClose, file, label, onConfirm}){
+    const canvasRef = useRef(null);
+    const [raw, setRaw] = useState(null);
+    const [cx, setCx] = useState(0.5);
+    const [cy, setCy] = useState(0.5);
+    const [rad, setRad] = useState(0.45);
+    useEffect(()=>{
+      if(!open || !file) return;
+      (async()=>{
+        const det = await (async()=>{
+          const img = await fileToImageBitmap(file);
+          const { canvas } = drawToCanvas(img, MAX_DIM);
+          const id = getImageData(canvas);
+          const g = grayscale(id);
+          const m = darkMask(g, 0.35);
+          const c = centroid(m.mask, m.width, m.height);
+          const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
+          return { src: canvas, width: canvas.width, height: canvas.height, cx: c.cx, cy: c.cy, r };
+        })();
+        setRaw(det);
+        setCx(det.cx/det.width);
+        setCy(det.cy/det.height);
+        const rRel = det.r / Math.min(det.width, det.height);
+        setRad(Math.min(0.49, rRel));
+      })();
+    }, [open, file]);
+    useEffect(()=>{
+      if (!raw || !open) return;
+      const can = canvasRef.current;
+      can.width = raw.width; can.height = raw.height;
+      const ctx = can.getContext("2d");
+      ctx.clearRect(0,0,can.width,can.height);
+      ctx.drawImage(raw.src, 0, 0);
+      const rpx = rad * Math.min(raw.width, raw.height);
+      const px = cx * raw.width, py = cy * raw.height;
+      ctx.save();
+      ctx.strokeStyle = "rgba(59,130,246,0.95)";
+      ctx.lineWidth = 2;
+      ctx.beginPath(); ctx.arc(px, py, rpx, 0, Math.PI*2); ctx.stroke();
+      ctx.restore();
+    }, [raw, cx, cy, rad, open]);
+    if (!open) return null;
+    return (
+      <div className="modal-backdrop" onClick={onClose}>
+        <div className="modal" onClick={e=>e.stopPropagation()}>
+          <header>
+            <div style={{fontWeight:700}}>Ajustar recorte — {label}</div>
+            <button className="btn" onClick={onClose}>Cerrar</button>
+          </header>
+          <div className="body">
+            {!raw ? <div className="muted">Cargando...</div> : (
+              <div className="preview">
+                <div className="preview-canvas">
+                  <canvas ref={canvasRef} style={{width:"100%",height:"100%"}} />
+                </div>
+                <div>
+                  <div className="slider"><span className="small">X</span><input type="range" min={0.0} max={1.0} step={0.001} value={cx} onChange={e=>setCx(parseFloat(e.target.value))}/></div>
+                  <div className="slider"><span className="small">Y</span><input type="range" min={0.0} max={1.0} step={0.001} value={cy} onChange={e=>setCy(parseFloat(e.target.value))}/></div>
+                  <div className="slider"><span className="small">R</span><input type="range" min={0.2} max={0.49} step={0.001} value={rad} onChange={e=>setRad(parseFloat(e.target.value))}/></div>
+                  <div className="muted small">Tip: mueve X/Y para centrar; ajusta R hasta el borde.</div>
+                </div>
+              </div>
+            )}
+          </div>
+          <div className="footer">
+            <button className="btn" onClick={()=>{
+              if(!raw) return;
+              const Rpx = rad * Math.min(raw.width, raw.height);
+              onConfirm({ srcCanvas: raw.src, cx: cx*raw.width, cy: cy*raw.height, r: Rpx });
+              onClose();
+            }}>Usar este recorte</button>
+          </div>
+        </div>
+      </div>
+    );
   }
 
   async function addSet(){
@@ -466,33 +584,144 @@ export default function App(){
     if(!fTop || !fBottom){ alert("Sube una imagen SUPERIOR y otra INFERIOR del puck."); return; }
     setBusy(true);
     try{
-      let topCrop = overrides.current.top;
-      if (!topCrop){
-        const det = await detectCircleFromFile(fTop);
-        topCrop = { srcCanvas: det.src, cx: det.cx, cy: det.cy, r: det.r };
-      }
+      const cropOrDetect = async (slot, file)=>{
+        if (overrides.current[slot]) return overrides.current[slot];
+        const img = await fileToImageBitmap(file);
+        const { canvas } = drawToCanvas(img, MAX_DIM);
+        const id = getImageData(canvas);
+        const g = grayscale(id);
+        const m = darkMask(g, 0.35);
+        const c = centroid(m.mask, m.width, m.height);
+        const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
+        return { srcCanvas: canvas, cx: c.cx, cy: c.cy, r };
+      };
+      const topCrop = await cropOrDetect("top", fTop);
+      const bottomCrop = await cropOrDetect("bottom", fBottom);
       const top = await analyzeFromCircle(topCrop.srcCanvas, topCrop.cx, topCrop.cy, topCrop.r);
+      const bottom = await analyzeFromCircle(bottomCrop.srcCanvas, bottomCrop.cx, bottomCrop.cy, bottomCrop.r);
 
-      let bottomCrop = overrides.current.bottom;
-      if (!bottomCrop){
-        const det = await detectCircleFromFile(fBottom);
-        bottomCrop = { srcCanvas: det.src, cx: det.cx, cy: det.cy, r: det.r };
+      // Optional prints
+      let topPrint=null, bottomPrint=null;
+      const fTopP = topPrintRef.current.files?.[0];
+      const fBotP = bottomPrintRef.current.files?.[0];
+      if (fTopP){
+        const det = await cropOrDetect("topPrint", fTopP);
+        topPrint = await analyzePrintFromCircle(det.srcCanvas, det.cx, det.cy, det.r);
       }
-      const bottomRaw = await analyzeFromCircle(bottomCrop.srcCanvas, bottomCrop.cx, bottomCrop.cy, bottomCrop.r);
+      if (fBotP){
+        const det = await cropOrDetect("bottomPrint", fBotP);
+        bottomPrint = await analyzePrintFromCircle(det.srcCanvas, det.cx, det.cy, det.r);
+      }
+
+      // Pair correlations
+      const a = Array.from(top.arrays.sectorMeans);
+      const b = Array.from(bottom.arrays.sectorMeans);
+      const abCorr = (corrPearson(a,b)+1)/2;
+      const ringFlag = bottom.metrics.ringDepth>0.02 ? "anillo" : "—";
+
+      // Paper corroboration (if present)
+      let paperSummary=null;
+      if (topPrint || bottomPrint){
+        const tp = topPrint?.arrays?.sectorMeans || a;
+        const bp = bottomPrint?.arrays?.sectorMeans || b;
+        const ppCorr = (corrPearson(tp,bp)+1)/2;
+        paperSummary = {
+          topChPct: topPrint?.metrics?.channelPct ?? null,
+          botChPct: bottomPrint?.metrics?.channelPct ?? null,
+          ppCorr
+        };
+      }
+
+      // Build recommendations (Gagné/Rao heuristics codificadas)
+      const rec = buildRecommendations({top,bottom,abCorr,paperSummary});
 
       const setItem = {
-        top, bottom: bottomRaw,
+        top, bottom, topPrint, bottomPrint, pair: { sectorCorr: abCorr },
         summary: {
           eciTop: round(top.metrics.eci),
-          eciBot: round(bottomRaw.metrics.eci),
-          ring: bottomRaw.metrics.ringDepth>0.02 ? "anillo" : "—"
-        }
+          eciBot: round(bottom.metrics.eci),
+          corr: Math.round(abCorr*100),
+          ring: ringFlag,
+          grind: round(top.metrics.granularity.bimodality)
+        },
+        rec
       };
       setSets(prev=> [setItem, ...prev]);
+      setExpanded(0);
+      // reset inputs for next run, but keep prints so user pueda reutilizar
       if (topRef.current) topRef.current.value=null;
       if (bottomRef.current) bottomRef.current.value=null;
       overrides.current={};
     } finally { setBusy(false); }
+  }
+
+  function buildRecommendations(ctx){
+    const { top, bottom, abCorr, paperSummary } = ctx;
+    const lines = [];
+    const bullets = [];
+
+    const eciB = bottom.metrics.eci;
+    const ringDepth = bottom.metrics.ringDepth;
+    const sectors = bottom.metrics.sectorStd;
+    const edges = bottom.metrics.edgeDensity;
+    const extremes = bottom.metrics.extremes;
+    const grindBI = top.metrics.granularity?.bimodality ?? 0;
+
+    // 1) Edge / ring issues (Rao: evitar anillo, distribución/tamp, headspace; Gagné: puck screen mejora uniformidad)
+    if (ringDepth > 0.03 && eciB > 0.02){
+      lines.push("Anillo oscuro pronunciado en la cara inferior con borde más oscuro que el centro.");
+      bullets.push("Baja dosis o usa cesta más alta para aumentar headspace; reduce densidad al borde.");
+      bullets.push("WDT fino hasta el borde y **no barrer** al final (riesgo de empujar finos al perímetro).");
+      bullets.push("Considera **puck screen** superior; ayuda a distribuir/pre-humedecer de forma más uniforme.");
+      bullets.push("Preinfusión suave (2–6 s) y rampa de presión gradual para no abrir canales periféricos.");
+    }
+
+    // 2) Angular variance / canales
+    if (sectors > 0.015){
+      lines.push("Alta desviación angular: hay sectores con caudal diferente (canales).");
+      bullets.push("Tras nivelar, **Rao spin** suave para igualar la densidad angular.");
+      bullets.push("Verifica la **ducha** y la distribución de caudal de la máquina (chorros desalineados amplifican sectores).");
+      bullets.push("Si usas papel, colócalo **sólo debajo** cuando el anillo sea persistente en inferior.");
+    }
+
+    // 3) Grietas y roturas
+    if (edges > 0.015 || extremes > 0.20){
+      lines.push("Evidencia de grietas/rupturas internas.");
+      bullets.push("Revisa **tamp**: presión recta, sin torsión ni golpecitos laterales.");
+      bullets.push("Si haces WDT agresivo, reduce profundidad o usa aguja más fina (0.3–0.4 mm).");
+      bullets.push("Revisa que el portafiltro no golpee la tolva al acoplar (microfracturas).");
+    }
+
+    // 4) Granulometría (fines + gruesos)
+    if (grindBI > 0.9){
+      lines.push("Señal de molienda bimodal (mucho fino y grueso).");
+      bullets.push("Cierra 1–2 clics y compensa con **ratio** o **shot time**; prioriza distribución suave.");
+      bullets.push("Si el café es muy fresco, aumenta **purga** y reduce estática para bajar finos.");
+    }
+
+    // 5) Correlación top/bottom
+    if (abCorr < 0.55){
+      lines.push("Baja correlación entre caras: lo que entra no coincide con lo que sale.");
+      bullets.push("Refuerza nivelación y uniformidad antes del tamp (objetivo: ↑ correlación angular).");
+    }
+
+    // 6) Papel corroboration
+    if (paperSummary){
+      const { topChPct, botChPct, ppCorr } = paperSummary;
+      if (ppCorr !== null && ppCorr < 0.55){
+        lines.push("La huella en papel no coincide entre caras; hay migraciones internas.");
+        bullets.push("Prueba **paper abajo** para sellar borde o cama, o reduce caudal inicial.");
+      }
+      if ((botChPct ?? 0) > 0.3){
+        lines.push("La huella inferior muestra concentración de canales (>30% de sectores rápidos).");
+        bullets.push("Revisa nivelación en perímetro y considera reducir presión pico.");
+      }
+    }
+
+    if (lines.length===0) lines.push("Distribución razonablemente uniforme; ajustes finos posibles.");
+    if (bullets.length===0) bullets.push("Mantén WDT homogéneo, verifica headspace (2–6 mm) y evita sobre-compactar.");
+
+    return { lines, bullets };
   }
 
   return (
@@ -500,7 +729,10 @@ export default function App(){
       <div className="row" style={{justifyContent:"space-between", alignItems:"flex-start", gap:16}}>
         <div>
           <h1 style={{margin:"0 0 6px 0"}}>Puck Diagnosis</h1>
-          <div className="muted">Sube <b>dos fotos por puck</b>. <span className="tag">Superior = ducha</span> <span className="tag">Inferior = canasta</span></div>
+          <div className="muted">
+            Sube <b>dos fotos por puck</b>: <span className="tag">Superior = lado ducha</span> <span className="tag">Inferior = lado canasta</span>.
+            <span className="tag">Opcional: huella en papel (superior/inferior)</span>
+          </div>
         </div>
         <div className="row">
           {["heatmap","guides","edges","sectors","ring"].map(key=>(
@@ -515,26 +747,39 @@ export default function App(){
       <div style={{height:12}} />
 
       <div className="card">
-        <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
-          <div className="row" style={{gap:16, alignItems:"center"}}>
-            <div>
-              <div className="small">Superior (group head)</div>
-              <input ref={topRef} type="file" accept="image/*" />
-              <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("top")}>Ajustar recorte</button></div>
-            </div>
-            <div>
-              <div className="small">Inferior (canasta)</div>
-              <input ref={bottomRef} type="file" accept="image/*" />
-              <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("bottom")}>Ajustar recorte</button></div>
-            </div>
+        <div className="row" style={{gap:16, alignItems:"flex-end", flexWrap:"wrap"}}>
+          <div>
+            <div className="small">Superior (lado ducha)</div>
+            <input ref={topRef} type="file" accept="image/*" />
+            <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("top")}>Ajustar recorte</button></div>
           </div>
-          <button className="btn" disabled={busy} onClick={addSet}>{busy? "Procesando..." : "Añadir set"}</button>
+          <div>
+            <div className="small">Inferior (lado canasta)</div>
+            <input ref={bottomRef} type="file" accept="image/*" />
+            <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("bottom")}>Ajustar recorte</button></div>
+          </div>
+          <div>
+            <div className="small">Huella en papel — Superior (opcional)</div>
+            <input ref={topPrintRef} type="file" accept="image/*" />
+            <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("topPrint")}>Ajustar recorte</button></div>
+          </div>
+          <div>
+            <div className="small">Huella en papel — Inferior (opcional)</div>
+            <input ref={bottomPrintRef} type="file" accept="image/*" />
+            <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("bottomPrint")}>Ajustar recorte</button></div>
+          </div>
+          <div style={{flex:1}} />
+          <div><button className="btn" disabled={busy} onClick={addSet}>{busy? "Procesando..." : "Añadir set"}</button></div>
         </div>
       </div>
 
       <AdjustModal
         open={adj.open}
-        label={adj.slot==="top"?"Superior":"Inferior"}
+        label={
+          adj.slot==="top" ? "Superior (ducha)" :
+          adj.slot==="bottom" ? "Inferior (canasta)" :
+          adj.slot==="topPrint" ? "Huella superior" : "Huella inferior"
+        }
         file={adj.file}
         onClose={()=>setAdj({open:false, slot:null, file:null})}
         onConfirm={(ov)=>{ overrides.current[adj.slot]=ov; }}
@@ -545,46 +790,104 @@ export default function App(){
       <div className="sets">
         {sets.map((st, idx)=>{
           const displayIndex = sets.length - idx;
+          const isOpen = expanded===idx;
           return (
             <div key={idx} className="card">
-              <div className="row" style={{justifyContent:"space-between"}}>
-                <div style={{fontWeight:600}}>Puck #{displayIndex}</div>
+              <div className="accordion-summary" onClick={()=>setExpanded(isOpen? -1 : idx)}>
+                <div style={{fontWeight:700}}>Puck #{displayIndex}</div>
                 <div className="summary-metrics small">
-                  <div>ECI sup/inf: <span className="mono">{st.summary.eciTop}</span>/<span className="mono">{st.summary.eciBot}</span></div>
-                  <div>Anillo: <span className="mono">{st.summary.ring}</span></div>
+                  <Pill>ECI sup/inf: <span className="mono">{st.summary.eciTop}</span>/<span className="mono">{st.summary.eciBot}</span></Pill>
+                  <Pill>Corr top/bot: <span className="mono">{st.summary.corr}%</span></Pill>
+                  <Pill>Granul.: <span className="mono">{st.summary.grind}</span></Pill>
+                  <Pill>Anillo: <span className="mono">{st.summary.ring}</span></Pill>
                 </div>
               </div>
-              <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16, marginTop:10}}>
-                {[{lab:"Superior", it: st.top}, {lab:"Inferior", it: st.bottom}].map((obj, k)=>(
-                  <div key={k}>
-                    <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
-                    <div className="thumb canvas-stack">
-                      <img src={obj.it.urls.croppedURL} alt={obj.lab} />
-                      {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
-                      {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
-                      {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
-                      {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
-                      {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
-                    </div>
-                    <div style={{height:8}} />
-                    <div className="metrics">
-                      <div>ECI: <span className="mono">{st.top.metrics.eci.toFixed(3)}</span></div>
-                      <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
-                      <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
-                      <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
-                      <div>Anillo (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
-                    </div>
-                    <div className="charts">
-                      <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
-                      <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
-                    </div>
+
+              {isOpen && (
+                <div style={{marginTop:12}}>
+                  <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16}}>
+                    {[{lab:"Superior (ducha)", it: st.top}, {lab:"Inferior (canasta)", it: st.bottom}].map((obj, k)=>(
+                      <div key={k}>
+                        <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
+                        <div className="thumb canvas-stack">
+                          <img src={obj.it.urls.croppedURL} alt={obj.lab} />
+                          {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
+                          {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                          {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
+                          {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                          {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
+                        </div>
+                        <div style={{height:8}} />
+                        <div className="metrics">
+                          <div>ECI: <span className="mono">{obj.it.metrics.eci.toFixed(3)}</span></div>
+                          <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
+                          <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                          <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
+                          <div>Anillo (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
+                          <div>Headspace (riesgo): <span className="mono">{(obj.it.metrics.headspace*100).toFixed(0)}%</span></div>
+                          <div>Granul. BI: <span className="mono">{(obj.it.metrics.granularity?.bimodality||0).toFixed(2)}</span></div>
+                        </div>
+                        <div className="charts">
+                          <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                          <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
+                        </div>
+                      </div>
+                    ))}
                   </div>
-                ))}
-              </div>
+
+                  {(st.topPrint || st.bottomPrint) && (
+                    <div style={{marginTop:16}}>
+                      <div style={{fontWeight:700, marginBottom:6}}>Huella en papel (opcional)</div>
+                      <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16}}>
+                        {[{lab:"Huella superior", it: st.topPrint}, {lab:"Huella inferior", it: st.bottomPrint}].map((obj, k)=>(
+                          obj.it ? (
+                            <div key={k}>
+                              <div className="thumb canvas-stack">
+                                <img src={obj.it.urls.croppedURL} alt={obj.lab} />
+                                {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
+                                {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                                {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                              </div>
+                              <div className="metrics" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
+                                <div>Canales%: <span className="mono">{(obj.it.metrics.channelPct*100).toFixed(0)}%</span></div>
+                                <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                                <div>Borde-medio: <span className="mono">{obj.it.metrics.radialEdgeBoost.toFixed(3)}</span></div>
+                              </div>
+                              <div className="charts">
+                                <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                                <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
+                              </div>
+                            </div>
+                          ) : <div key={k} className="muted small">({obj.lab} no cargada)</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{marginTop:16}}>
+                    <div style={{fontWeight:700, marginBottom:6}}>Recomendaciones</div>
+                    {ctxBlock(st.rec)}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
       </div>
     </div>
   );
+
+  function ctxBlock(rec){
+    return (
+      <div>
+        <ul style={{marginTop:0}}>
+          {rec.lines.map((l,i)=><li key={i}>{l}</li>)}
+        </ul>
+        <div className="small muted" style={{margin:"6px 0"}}>Acciones sugeridas:</div>
+        <ul>
+          {rec.bullets.map((b,i)=><li key={i}>{b}</li>)}
+        </ul>
+      </div>
+    );
+  }
 }
