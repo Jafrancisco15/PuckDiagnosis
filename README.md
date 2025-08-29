@@ -1,13 +1,10 @@
-# Puck Diagnosis v0.2
+# Puck Diagnosis v0.3
 
-App React (Vite) para análisis visual de pucks con **overlays opcionales**:
-- Recorta y centra el puck, **fondo transparente**.
-- Métricas: Δ borde-centro (ECI), extremos tonales.
-- **Heatmap** de variación local (bloques).
-- **Líneas guía** (anillos y radios).
-- **Resaltado de grietas/canales** (Sobel + umbral adaptativo).
-- **Mapa de sectores** (desviación angular).
-- Gráficos: **perfil radial** y **histograma**.
+Mejoras clave respecto a v0.2:
+- **Overlays 1:1**: todos (heatmap, guías, grietas, sectores) tienen el **mismo tamaño** que el recorte → se alinean perfectos.
+- **Leyenda** en el **mapa de sectores** (rojo = más oscuro/atascos, azul = más claro/flujo rápido).
+- **Recomendaciones analíticas** y priorizadas con explicación de métricas: ECI, extremos, desviación angular, densidad de grietas y desalineación.
+- **Histogramas/perfil** redimensionados y contenidos en tarjetas separadas.
 
 ## Uso
 ```bash
@@ -15,11 +12,11 @@ npm i
 npm run dev
 ```
 
-## Despliegue (Vercel)
-Framework: Vite · Build: `npm run build` · Output: `dist/`
+## Deploy (Vercel)
+Framework: **Vite** · Build: `npm run build` · Output: `dist/`
 
-## Ajustes clave (src/App.jsx)
-- Detección del puck: `darkMask(..., 0.35)`
-- Grietas: umbral en `drawEdgesOverlay` (`mean + 1.1*std`)
-- Sectores: `sectorDeviation(..., sectors=24)` y escala `1.2*std`
-- Heatmap: tamaño de bloque en `localVariance(..., 14)`
+## Ajustes
+- Detección puck: `darkMask(..., 0.35)`
+- Grietas: `drawEdgesOverlay` (umbral `mean + 1.1*std`)
+- Sectores: `drawSectorsOverlay(..., 24)` + leyenda
+- Heatmap: `localVariance(..., 64)` (bloques) → se pinta a tamaño del recorte
