@@ -1,23 +1,25 @@
-# Puck Diagnosis
+# Puck Diagnosis v0.2
 
-App ligera (React + Vite) para analizar canalización en pucks de espresso a partir de fotos.
-- Recorta y centra automáticamente el puck y remueve el fondo (transparente).
-- Calcula métricas simples (Δ borde‑centro, heterogeneidad, extremos) y clasifica (OK/Leve/Severa).
-- Genera heatmap opcional de variación local.
-- 100% client‑side.
+App React (Vite) para análisis visual de pucks con **overlays opcionales**:
+- Recorta y centra el puck, **fondo transparente**.
+- Métricas: Δ borde-centro (ECI), extremos tonales.
+- **Heatmap** de variación local (bloques).
+- **Líneas guía** (anillos y radios).
+- **Resaltado de grietas/canales** (Sobel + umbral adaptativo).
+- **Mapa de sectores** (desviación angular).
+- Gráficos: **perfil radial** y **histograma**.
 
-## Desarrollo
+## Uso
 ```bash
 npm i
 npm run dev
 ```
 
-## Build y despliegue (Vercel)
-```bash
-npm run build
-# sube el repo a GitHub y conéctalo a Vercel (framework: Vite)
-```
+## Despliegue (Vercel)
+Framework: Vite · Build: `npm run build` · Output: `dist/`
 
-## Estructura
-- `src/App.jsx` — lógica de procesamiento (sin dependencias externas).
-- `index.html` — estilos mínimos embebidos.
+## Ajustes clave (src/App.jsx)
+- Detección del puck: `darkMask(..., 0.35)`
+- Grietas: umbral en `drawEdgesOverlay` (`mean + 1.1*std`)
+- Sectores: `sectorDeviation(..., sectors=24)` y escala `1.2*std`
+- Heatmap: tamaño de bloque en `localVariance(..., 14)`
