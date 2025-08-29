@@ -1,8 +1,7 @@
 {
   "name": "puck-diagnosis",
+  "version": "0.7.0",
   "private": true,
-  "version": "0.3.0",
-  "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "vite build",
@@ -14,7 +13,7 @@
     "jspdf": "^2.5.1"
   },
   "devDependencies": {
-    "vite": "^5.4.0",
+    "vite": "^5.4.7",
     "@vitejs/plugin-react": "^4.3.1"
   }
 }
