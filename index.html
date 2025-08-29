@@ -28,7 +28,12 @@
       .canvas-stack { position: relative; width: 100%; }
       .canvas-stack img { display: block; width: 100%; height: auto; }
       .canvas-stack .overlay { position: absolute; inset: 0; width: 100%; height: 100%; }
-      .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px;}
+      .charts { display: grid; grid-template-columns: 1fr; gap: 8px; margin-top: 10px;}
+@media (min-width: 900px){
+  .charts { grid-template-columns: 1fr 1fr; }
+}
+.chart { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px; position: relative; overflow: hidden; }
+.chart img { display:block; width:100%; height:auto; position: relative; z-index: 0; }
       .chart { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 10px; padding: 8px; }
     </style>
   </head>
