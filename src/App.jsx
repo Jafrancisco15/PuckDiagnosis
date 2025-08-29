@@ -1,6 +1,7 @@
 import React, { useCallback, useState, useRef } from "react";
+import { jsPDF } from "jspdf";
 
-// ==== Helpers (heredados de v0.4) ====
+// ==== Helpers ====
 const MAX_DIM = 1024;
 function clamp01(x){ return Math.min(1, Math.max(0, x)); }
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -77,7 +78,38 @@ function robustRadius(mask, width, height, cx, cy) {
   const p80 = dists[Math.floor(dists.length*0.80)];
   return p80;
 }
-function cropCircle(srcCanvas, cx, cy, r, pad=1.15) {
+// ---- Circle fit (Kåsa) for paper prints ----
+function circleFitKasa(points){
+  const n = points.length;
+  if (n<3) return null;
+  let sumx=0,sumy=0,sumx2=0,sumy2=0,sumxy=0,sumz=0,sumxz=0,sumyz=0;
+  for (const [x,y] of points){
+    const z = x*x + y*y;
+    sumx+=x; sumy+=y; sumx2+=x*x; sumy2+=y*y; sumxy+=x*y; sumz+=z; sumxz+=x*z; sumyz+=y*z;
+  }
+  const A = [[sumx, sumy, n],[sumx2, sumxy, sumx],[sumxy, sumy2, sumy]];
+  const B = [ -sumz, -sumxz, -sumyz ];
+  function det3(m){
+    return m[0][0]*(m[1][1]*m[2][2]-m[1][2]*m[2][1]) - m[0][1]*(m[1][0]*m[2][2]-m[1][2]*m[2][0]) + m[0][2]*(m[1][0]*m[2][1]-m[1][1]*m[2][0]);
+  }
+  function solve3(a,b){
+    const d = det3(a);
+    if (Math.abs(d) < 1e-8) return null;
+    const a1 = [[b[0],a[0][1],a[0][2]],[b[1],a[1][1],a[1][2]],[b[2],a[2][1],a[2][2]]];
+    const a2 = [[a[0][0],b[0],a[0][2]],[a[1][0],b[1],a[1][2]],[a[2][0],b[2],a[2][2]]];
+    const a3 = [[a[0][0],a[0][1],b[0]],[a[1][0],a[1][1],b[1]],[a[2][0],a[2][1],b[2]]];
+    const A = det3(a1)/d, B = det3(a2)/d, C = det3(a3)/d;
+    return [A,B,C];
+  }
+  const sol = solve3(A,B);
+  if (!sol) return null;
+  const [A1,B1,C1] = sol;
+  const cx = -A1/2, cy = -B1/2;
+  const R = Math.sqrt(Math.max(0, cx*cx + cy*cy - C1));
+  return { cx, cy, r: R };
+}
+
+function cropCircleFromCanvas(srcCanvas, cx, cy, r, pad=1.15){
   const size = Math.max(64, Math.ceil(2*r*pad));
   const out = document.createElement("canvas");
   out.width = size; out.height = size;
@@ -106,6 +138,7 @@ function cropCircle(srcCanvas, cx, cy, r, pad=1.15) {
   ctx.putImageData(id,0,0);
   return out;
 }
+
 function polarStats(gray, width, height, cx, cy, r) {
   const bins = 120;
   const sum = new Float64Array(bins);
@@ -295,8 +328,8 @@ function drawEdgesOverlay(gray, width, height, cx, cy, r){
   const density = area? insideEdges/area : 0;
   return { can, thr, mean, std, density };
 }
-// === Dark ring detection (annulus near edge) ===
-function detectDarkRing(profile, band=[0.78,0.95]){
+// Dark ring detection
+function detectDarkRing(profile, band=[0.78,0.96]){
   const n = profile.length;
   const i0 = Math.floor(band[0]*n);
   const i1 = Math.min(n-1, Math.floor(band[1]*n));
@@ -305,7 +338,7 @@ function detectDarkRing(profile, band=[0.78,0.95]){
     const v = profile[i];
     if (v < minV){ minV=v; minI=i; }
   }
-  const pos = minI / n; // 0..1 radius
+  const pos = minI / n;
   return { minV, pos };
 }
 function drawRingOverlay(size, r, pos, band=0.06){
@@ -316,14 +349,12 @@ function drawRingOverlay(size, r, pos, band=0.06){
   const rMid = pos * r;
   const r1 = Math.max(0, rMid - band*r);
   const r2 = Math.min(r, rMid + band*r);
-  ctx.fillStyle="rgba(168,85,247,0.28)"; // purple
+  ctx.fillStyle="rgba(168,85,247,0.28)";
   ctx.beginPath(); ctx.arc(cx, cy, r2, 0, Math.PI*2); ctx.arc(cx, cy, r1, 0, Math.PI*2, true); ctx.closePath(); ctx.fill();
-  // label
   ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(8, 8, 150, 20);
   ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Anillo oscuro (estimado)", 12, 22);
   return can;
 }
-
 function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   const sums = new Float64Array(sectors);
   const cnts = new Uint32Array(sectors);
@@ -369,9 +400,9 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   ctx.globalAlpha = 1;
   const pad=8;
   ctx.fillStyle="rgba(0,0,0,0.45)";
-  ctx.fillRect(pad, pad, 210, 52);
+  ctx.fillRect(pad, pad, 230, 52);
   ctx.strokeStyle="rgba(255,255,255,0.25)";
-  ctx.strokeRect(pad, pad, 210, 52);
+  ctx.strokeRect(pad, pad, 230, 52);
   ctx.font="12px ui-sans-serif"; ctx.fillStyle="rgba(255,255,255,0.85)";
   ctx.fillText("Mapa de sectores (desv. angular)", pad+8, pad+16);
   ctx.fillStyle="rgba(239,68,68,0.9)"; ctx.fillRect(pad+8, pad+24, 16, 12);
@@ -432,7 +463,7 @@ async function canvasToURL(can){
   const b = await new Promise(res=>can.toBlob(res, "image/png"));
   return URL.createObjectURL(b);
 }
-function corr(a,b){
+function corrPearson(a,b){
   const n = Math.min(a.length, b.length);
   let sx=0, sy=0, sxx=0, syy=0, sxy=0;
   for (let i=0;i<n;i++){
@@ -444,20 +475,103 @@ function corr(a,b){
   const vx = sxx/n - (sx/n)*(sx/n);
   const vy = syy/n - (sy/n)*(sy/n);
   const denom = Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12));
-  return denom>0? clamp01((cov/denom + 1)/2) : 0;
+  return denom>0? cov/denom : 0;
+}
+function alignSectorMeans(a, b, allowReverse=true){
+  // Try all cyclic shifts; if allowReverse, try reversed as well. Return best aligned b' and shift info.
+  const n = a.length;
+  let best = { corr:-2, shift:0, reversed:false, aligned:null };
+  function shiftArr(arr,k){
+    const out = new Array(n);
+    for (let i=0;i<n;i++){ out[i] = arr[(i-k+n)%n]; }
+    return out;
+  }
+  const variants = [ {arr:b, reversed:false} ];
+  if (allowReverse) variants.push({arr:[...b].reverse(), reversed:true});
+  for (const v of variants){
+    for (let k=0;k<n;k++){
+      const bb = shiftArr(v.arr,k);
+      const c = corrPearson(a, bb);
+      if (c > best.corr){ best = { corr:c, shift:k, reversed:v.reversed, aligned:bb }; }
+    }
+  }
+  return best;
+}
+function zScore(arr){
+  const n = arr.length;
+  let s=0, s2=0;
+  for (let i=0;i<n;i++){ s+=arr[i]; s2+=arr[i]*arr[i]; }
+  const mean = s/n;
+  const std = Math.sqrt(Math.max(s2/n - mean*mean, 1e-8));
+  return { mean, std, z: arr.map(v=>(v-mean)/(std||1)) };
+}
+function drawSectorHighlights(size, r, sectors, indicesDark, indicesLight){
+  const can = document.createElement("canvas");
+  can.width=size; can.height=size;
+  const ctx = can.getContext("2d");
+  const cx=size/2, cy=size/2;
+  const step = (Math.PI*2)/sectors;
+  ctx.lineWidth = 6;
+  // dark = red arcs at ~85-95% radius, light = cyan arcs
+  function arcForIndex(i, color){
+    const a0 = i*step, a1 = (i+1)*step;
+    ctx.strokeStyle = color;
+    ctx.beginPath();
+    ctx.arc(cx, cy, r*0.92, a0+0.04, a1-0.04);
+    ctx.stroke();
+  }
+  indicesDark.forEach(i=>arcForIndex(i, "rgba(239,68,68,0.85)"));
+  indicesLight.forEach(i=>arcForIndex(i, "rgba(34,211,238,0.85)"));
+  // legend
+  ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(8,8,190,40);
+  ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Sectores coincidentes", 14, 22);
+  ctx.fillStyle="rgba(239,68,68,0.85)"; ctx.fillRect(14,26,14,6);
+  ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.fillText("oscuros (canales)", 34, 32);
+  ctx.fillStyle="rgba(34,211,238,0.85)"; ctx.fillRect(120,26,14,6);
+  ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.fillText("claros", 140, 32);
+  return can;
 }
 
-// Analizar imagen (cara puck o huella)
-async function analyzeImageFile(file){
+// ---- Analyze puck face or paper print ----
+async function analyzeImageFile(file, mode="puck"){
   const img = await fileToImageBitmap(file);
   const { canvas } = drawToCanvas(img, MAX_DIM);
   const id = getImageData(canvas);
   const g = grayscale(id);
-  const m = darkMask(g, 0.35);
-  const c = centroid(m.mask, m.width, m.height);
-  const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
-  const cropped = cropCircle(canvas, c.cx, c.cy, r, 1.18);
 
+  // initial estimate
+  let m = darkMask(g, 0.35);
+  let c = centroid(m.mask, m.width, m.height);
+  let r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
+
+  // If paper print: refine center/radius by circle fit on edges near rim
+  if (mode === "print"){
+    const { mag, mean, std } = sobel(g.gray, g.width, g.height);
+    const thr = mean + 1.2*std;
+    const pts = [];
+    const rMin = r*0.75, rMax = r*1.25;
+    for (let y=1;y<g.height-1;y++){
+      for (let x=1;x<g.width-1;x++){
+        const i = y*g.width + x;
+        if (mag[i] > thr){
+          const dx = x-c.cx, dy=y-c.cy;
+          const d = Math.hypot(dx,dy);
+          if (d>=rMin && d<=rMax){
+            pts.push([x,y]);
+          }
+        }
+      }
+    }
+    if (pts.length>50){
+      const fit = circleFitKasa(pts);
+      if (fit){
+        c = { cx: fit.cx, cy: fit.cy, count: pts.length };
+        r = fit.r;
+      }
+    }
+  }
+
+  const cropped = cropCircleFromCanvas(canvas, c.cx, c.cy, r, 1.18);
   const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
   const cg = grayscale(cid);
   const centerX = cropped.width/2, centerY = cropped.height/2;
@@ -470,16 +584,14 @@ async function analyzeImageFile(file){
   const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
   const guides = drawGuides(cropped.width, r, 12);
 
-  // Dark ring (annulus)
   const ring = detectDarkRing(stats.profile, [0.78,0.96]);
-  const ringDepth = (stats.mid - ring.minV); // >0 => más oscuro que el medio
+  const ringDepth = (stats.mid - ring.minV);
   const ringOverlay = drawRingOverlay(cropped.width, r, ring.pos, 0.06);
 
   // charts
   const profileChart = drawProfileChart(Array.from(stats.profile));
   const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
-  // urls
   const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
     canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
     canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
@@ -501,6 +613,7 @@ async function analyzeImageFile(file){
   };
 }
 
+// Pair recommendations (same as v0.5 with text tweaks)
 function pairRecommendations(top, bottom, pair){
   const L = [];
   const B = [];
@@ -516,10 +629,10 @@ function pairRecommendations(top, bottom, pair){
     B.push("Canales atraviesan el puck (coinciden sectores). WDT profundo y uniforme, preinfusión suave, verifica nivelación del tamper.");
   }
   if (bottom.metrics.ringDepth>0.02){
-    B.push("Anillo oscuro en la cara inferior: posible bypass por la periferia. Revisa headspace, diámetro del tamper (ajustado), y valora filtro de papel inferior.");
+    B.push("Anillo oscuro en la cara inferior: posible bypass periférico. Revisa headspace, diámetro del tamper (ajustado), y valora filtro de papel inferior.");
   }
   if (bottom.metrics.edgeDensity > top.metrics.edgeDensity + 0.03){
-    B.push("Más grietas en inferior: reduce golpes post-tamper, baja el ramp‑up de presión y evalúa paper filter abajo.");
+    B.push("Más grietas en inferior: reduce golpes post-tamper, baja el ramp-up de presión y evalúa paper filter abajo.");
   }
   if (top.metrics.extremes > bottom.metrics.extremes + 0.05){
     B.push("La cara superior presenta más extremos: mejora la distribución antes del tamper (WDT 10–15 s, romper grumos, RDT si hay estática).");
@@ -530,21 +643,32 @@ function pairRecommendations(top, bottom, pair){
   return { lines: L, bullets: B };
 }
 
-function downloadBlob(filename, blob){
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+// Build composite image (base + selected overlays + optional sector highlights) -> dataURL
+async function composeImage(urls, overlays, highlightURL){
+  const baseImg = new Image(); baseImg.src = urls.croppedURL; await baseImg.decode().catch(()=>{});
+  const can = document.createElement("canvas");
+  can.width = baseImg.width; can.height = baseImg.height;
+  const ctx = can.getContext("2d");
+  ctx.drawImage(baseImg,0,0);
+  for (const u of overlays){
+    if (!u) continue;
+    const img = new Image(); img.src = u; await img.decode().catch(()=>{});
+    ctx.drawImage(img,0,0,can.width,can.height);
+  }
+  if (highlightURL){
+    const img = new Image(); img.src = highlightURL; await img.decode().catch(()=>{});
+    ctx.drawImage(img,0,0,can.width,can.height);
+  }
+  return can.toDataURL("image/png");
 }
 
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true });
-  const [rotateBack, setRotateBack] = useState(true); // 180° al comparar sectores
+  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true, coinc:false });
+  const [rotateBack, setRotateBack] = useState(true);
   const topRef = useRef(); const bottomRef = useRef();
-  const topPrintRef = useRef(); const bottomPrintRef = useRef(); // huellas en papel (opcional)
+  const topPrintRef = useRef(); const bottomPrintRef = useRef();
 
   async function addSet(){
     const fTop = topRef.current.files?.[0];
@@ -552,9 +676,44 @@ export default function App(){
     if(!fTop || !fBottom){ alert("Sube una imagen SUPERIOR y otra INFERIOR del puck."); return; }
     setBusy(true);
     try{
-      const [top, bottomRaw] = await Promise.all([analyzeImageFile(fTop), analyzeImageFile(fBottom)]);
+      const [top, bottomRaw] = await Promise.all([analyzeImageFile(fTop, "puck"), analyzeImageFile(fBottom, "puck")]);
 
-      // rotación inferior para comparación de sectores
+      // Sector alignment to find coincident sectors
+      const a = Array.from(top.arrays.sectorMeans);
+      const bRaw = Array.from(bottomRaw.arrays.sectorMeans);
+      const align = alignSectorMeans(a, bRaw, true);
+      const sectorCorr = Math.max(0, Math.min(1, (align.corr+1)/2));
+      // Compute coincident indices (> |z| thresh in both, same sign)
+      const zA = zScore(a), zB = zScore(align.aligned);
+      const TH = 1.0;
+      const coincDark = [], coincLight = [];
+      for (let i=0;i<a.length;i++){
+        if (zA.z[i] <= -TH && zB.z[i] <= -TH) coincDark.push(i);
+        if (zA.z[i] >= TH && zB.z[i] >= TH) coincLight.push(i);
+      }
+      // Draw highlight overlays for both faces (map indices back to bottomRaw indexing)
+      async function makeHighlights(face, indicesDark, indicesLight, sectors=24){
+        const size = face.dim.w, r = face.dim.r;
+        const can = drawSectorHighlights(size, r, sectors, indicesDark, indicesLight);
+        return await canvasToURL(can);
+      }
+      const hiTopURL = await makeHighlights(top, coincDark, coincLight, a.length);
+      // Map indices to raw bottom:
+      function unalignIndex(i){
+        // reversed? shift?
+        let idx = i;
+        if (align.reversed){
+          idx = (a.length - 1 - idx);
+        }
+        idx = (idx + align.shift) % a.length;
+        return idx;
+      }
+      const darkBottom = coincDark.map(unalignIndex);
+      const lightBottom = coincLight.map(unalignIndex);
+
+      const hiBottomURL = await makeHighlights(bottomRaw, darkBottom, lightBottom, a.length);
+
+      // visual rotation (optional) for bottom face
       let bottom = bottomRaw;
       if (rotateBack){
         const imgRes = await fetch(bottomRaw.urls.croppedURL);
@@ -573,29 +732,90 @@ export default function App(){
         bottom = { ...bottomRaw, urls: { ...bottomRaw.urls, croppedURL: rotatedURL } };
       }
 
-      // correlación sectorial (ajustada)
-      const a = Array.from(top.arrays.sectorMeans);
-      let b = Array.from(bottomRaw.arrays.sectorMeans);
-      if (rotateBack) b = b.slice().reverse();
-      const sectorCorr = corr(a,b);
-
-      const pair = { sectorCorr };
+      const pair = { sectorCorr, align };
       const rec = pairRecommendations(top, bottomRaw, pair);
 
-      // Huellas en papel (opcionales)
+      // Optional paper prints
       let topPrint = null, bottomPrint = null;
       const fTopP = topPrintRef.current.files?.[0];
       const fBottomP = bottomPrintRef.current.files?.[0];
-      if (fTopP) topPrint = await analyzeImageFile(fTopP);
-      if (fBottomP) bottomPrint = await analyzeImageFile(fBottomP);
+      if (fTopP) topPrint = await analyzeImageFile(fTopP, "print");
+      if (fBottomP) bottomPrint = await analyzeImageFile(fBottomP, "print");
 
-      setSets(prev=>[...prev, { top, bottom, bottomRaw, pair, rec, topPrint, bottomPrint }]);
+      setSets(prev=>[...prev, {
+        top, bottom, bottomRaw, pair, rec,
+        highlights: { top: hiTopURL, bottom: hiBottomURL },
+        topPrint, bottomPrint
+      }]);
       topRef.current.value = null; bottomRef.current.value = null;
       if (topPrintRef.current) topPrintRef.current.value = null;
       if (bottomPrintRef.current) bottomPrintRef.current.value = null;
     } finally {
       setBusy(false);
     }
+  }
+
+  async function exportPDF(index){
+    const st = sets[index];
+    const doc = new jsPDF({ unit: "pt", format: "a4" });
+    const W = doc.internal.pageSize.getWidth();
+    const M = 36;
+    let y = M;
+
+    doc.setFontSize(16); doc.text(`Puck Diagnosis — Set #${index+1}`, M, y); y+=18;
+    doc.setFontSize(10);
+    doc.text(`Correlación sectores (ajustada): ${Math.round(st.pair.sectorCorr*100)}%`, M, y); y+=14;
+    doc.text(`Superior — ECI: ${round(st.top.metrics.eci)} | Extremos: ${(st.top.metrics.extremes*100).toFixed(1)}% | σ: ${round(st.top.metrics.sectorStd)} | Grietas: ${(st.top.metrics.edgeDensity*100).toFixed(2)}%`, M, y); y+=12;
+    doc.text(`Inferior — ECI: ${round(st.bottomRaw.metrics.eci)} | Extremos: ${(st.bottomRaw.metrics.extremes*100).toFixed(1)}% | σ: ${round(st.bottomRaw.metrics.sectorStd)} | Grietas: ${(st.bottomRaw.metrics.edgeDensity*100).toFixed(2)}% | Anillo: prof ${round(st.bottomRaw.metrics.ringDepth)} @ r≈${Math.round(st.bottomRaw.metrics.ringPos*100)}%`, M, y); y+=16;
+
+    // Compose display images with overlays + highlights
+    const oTop = [];
+    const oBottom = [];
+    if (overlay.heatmap) { oTop.push(st.top.urls.hmURL); oBottom.push(st.bottom.urls.hmURL); }
+    if (overlay.guides)  { oTop.push(st.top.urls.guideURL); oBottom.push(st.bottom.urls.guideURL); }
+    if (overlay.edges)   { oTop.push(st.top.urls.edgeURL); oBottom.push(st.bottom.urls.edgeURL); }
+    if (overlay.sectors) { oTop.push(st.top.urls.sectorURL); oBottom.push(st.bottom.urls.sectorURL); }
+    if (overlay.ring)    { oTop.push(st.top.urls.ringURL); oBottom.push(st.bottom.urls.ringURL); }
+    if (overlay.coinc)   { /* highlights added later in compose */ }
+
+    const topDataURL = await composeImage(st.top.urls, oTop, overlay.coinc ? st.highlights.top : null);
+    const bottomDataURL = await composeImage(st.bottom.urls, oBottom, overlay.coinc ? st.highlights.bottom : null);
+
+    const imgW = (W - M*3)/2;
+    const imgH = imgW; // square
+    doc.addImage(topDataURL, "PNG", M, y, imgW, imgH);
+    doc.addImage(bottomDataURL, "PNG", M*2+imgW, y, imgW, imgH);
+    y += imgH + 18;
+
+    // Recommendations (wrap)
+    doc.setFontSize(12); doc.text("Recomendaciones:", M, y); y+=14;
+    doc.setFontSize(10);
+    const wrapWidth = W - M*2;
+    const allRec = st.rec.bullets.join(" • ");
+    const split = doc.splitTextToSize(allRec, wrapWidth);
+    doc.text(split, M, y);
+    y += 14 * split.length;
+
+    // Second page for paper prints if present
+    if (st.topPrint || st.bottomPrint){
+      doc.addPage();
+      let y2 = M;
+      doc.setFontSize(14); doc.text("Huellas en papel", M, y2); y2+=18;
+      const imgW2 = (W - M*3)/2;
+      const imgH2 = imgW2;
+      if (st.topPrint){
+        const d1 = await composeImage(st.topPrint.urls, [overlay.sectors? st.topPrint.urls.sectorURL : null, overlay.ring? st.topPrint.urls.ringURL:null], null);
+        doc.addImage(d1, "PNG", M, y2, imgW2, imgH2);
+        doc.setFontSize(10); doc.text("Superior (papel)", M, y2+imgH2+12);
+      }
+      if (st.bottomPrint){
+        const d2 = await composeImage(st.bottomPrint.urls, [overlay.sectors? st.bottomPrint.urls.sectorURL : null, overlay.ring? st.bottomPrint.urls.ringURL:null], null);
+        doc.addImage(d2, "PNG", M*2+imgW2, y2, imgW2, imgH2);
+        doc.setFontSize(10); doc.text("Inferior (papel)", M*2+imgW2, y2+imgH2+12);
+      }
+    }
+
+    doc.save(`puck-report-set-${index+1}.pdf`);
   }
 
   return (
@@ -628,6 +848,10 @@ export default function App(){
           <label className="row small" style={{gap:8}}>
             <input type="checkbox" checked={overlay.ring} onChange={e=>setOverlay(o=>({...o, ring:e.target.checked}))} />
             <span>Anillo oscuro</span>
+          </label>
+          <label className="row small" style={{gap:8}} title="Marca los sectores problemáticos que coinciden en ambas caras">
+            <input type="checkbox" checked={overlay.coinc} onChange={e=>setOverlay(o=>({...o, coinc:e.target.checked}))} />
+            <span>Sectores coincidentes</span>
           </label>
         </div>
       </div>
@@ -670,11 +894,14 @@ export default function App(){
       <div className="sets">
         {sets.map((st, idx)=>(
           <div key={idx} className="card">
-            <div style={{fontWeight:600}} className="small">Puck #{idx+1}</div>
+            <div style={{display:"flex", justifyContent:"space-between", alignItems:"center", gap:12}}>
+              <div style={{fontWeight:600}} className="small">Puck #{idx+1}</div>
+              <button className="btn" onClick={()=>exportPDF(idx)}>Exportar PDF</button>
+            </div>
 
             {/* Dos columnas: superior / inferior */}
             <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16, marginTop:10}}>
-              {[{lab:"Superior (group head)", it: st.top}, {lab:"Inferior (canasta)", it: st.bottom}].map((obj, k)=>(
+              {[{lab:"Superior (group head)", it: st.top, hi: st.highlights.top}, {lab:"Inferior (canasta)", it: st.bottom, hi: st.highlights.bottom}].map((obj, k)=>(
                 <div key={k}>
                   <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
                   <div className="thumb canvas-stack">
@@ -684,6 +911,7 @@ export default function App(){
                     {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
                     {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
                     {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
+                    {overlay.coinc && <img className="overlay" src={obj.hi} alt="coinc" />}
                   </div>
 
                   <div style={{height:8}} />
@@ -757,7 +985,7 @@ export default function App(){
       <div style={{height:24}} />
       <div className="muted small">
         * Definiciones: <b>Superior</b> = lado contra la ducha (group head). <b>Inferior</b> = lado hacia la canasta/boquilla.<br/>
-        * Sube también las <b>huellas en papel</b> (superior e inferior) para reforzar el diagnóstico de bypass/anillos.
+        * Huellas en papel: el centrado ahora se afina por <b>ajuste de círculo</b> (Kåsa) sobre el borde → evita desplazamientos.
       </div>
     </div>
   );
