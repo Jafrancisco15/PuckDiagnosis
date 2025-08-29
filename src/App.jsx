@@ -1,6 +1,6 @@
 import React, { useCallback, useState, useRef } from "react";
 
-// ==== Helpers & core from v0.3.1 (simplified here, same logic) ====
+// ==== Helpers (heredados de v0.4) ====
 const MAX_DIM = 1024;
 function clamp01(x){ return Math.min(1, Math.max(0, x)); }
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -107,7 +107,7 @@ function cropCircle(srcCanvas, cx, cy, r, pad=1.15) {
   return out;
 }
 function polarStats(gray, width, height, cx, cy, r) {
-  const bins = 100;
+  const bins = 120;
   const sum = new Float64Array(bins);
   const cnt = new Uint32Array(bins);
   for (let y=0;y<height;y++){
@@ -123,16 +123,16 @@ function polarStats(gray, width, height, cx, cy, r) {
   }
   const prof = new Float64Array(bins);
   for (let i=0;i<bins;i++) prof[i] = cnt[i] ? sum[i]/cnt[i] : 0;
-  const ring = (a,b)=>{
+  const ringAvg = (a,b)=>{
     let s=0,c=0;
     const i0=Math.floor(a*bins), i1=Math.min(bins-1, Math.floor(b*bins));
     for (let i=i0;i<=i1;i++){ s+=prof[i]; c++; }
     return c? s/c : 0;
   };
-  const mid = ring(0.45,0.65);
-  const edge = ring(0.85,0.99);
+  const mid = ringAvg(0.45,0.65);
+  const edge = ringAvg(0.90,0.99);
   const eci = edge - mid;
-  return { profile: prof, eci, mid, edge };
+  return { profile: prof, eci, mid, edge, ringAvg };
 }
 function localVariance(gray, width, height, cx, cy, r, blocks=64) {
   const wBlocks = blocks, hBlocks = blocks;
@@ -295,6 +295,35 @@ function drawEdgesOverlay(gray, width, height, cx, cy, r){
   const density = area? insideEdges/area : 0;
   return { can, thr, mean, std, density };
 }
+// === Dark ring detection (annulus near edge) ===
+function detectDarkRing(profile, band=[0.78,0.95]){
+  const n = profile.length;
+  const i0 = Math.floor(band[0]*n);
+  const i1 = Math.min(n-1, Math.floor(band[1]*n));
+  let minV = Infinity, minI = i0;
+  for (let i=i0;i<=i1;i++){
+    const v = profile[i];
+    if (v < minV){ minV=v; minI=i; }
+  }
+  const pos = minI / n; // 0..1 radius
+  return { minV, pos };
+}
+function drawRingOverlay(size, r, pos, band=0.06){
+  const can = document.createElement("canvas");
+  can.width=size; can.height=size;
+  const ctx = can.getContext("2d");
+  const cx=size/2, cy=size/2;
+  const rMid = pos * r;
+  const r1 = Math.max(0, rMid - band*r);
+  const r2 = Math.min(r, rMid + band*r);
+  ctx.fillStyle="rgba(168,85,247,0.28)"; // purple
+  ctx.beginPath(); ctx.arc(cx, cy, r2, 0, Math.PI*2); ctx.arc(cx, cy, r1, 0, Math.PI*2, true); ctx.closePath(); ctx.fill();
+  // label
+  ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(8, 8, 150, 20);
+  ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Anillo oscuro (estimado)", 12, 22);
+  return can;
+}
+
 function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   const sums = new Float64Array(sectors);
   const cnts = new Uint32Array(sectors);
@@ -352,7 +381,7 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   return { can, means, globalMean, std };
 }
 function drawProfileChart(profile){
-  const W=420, H=130, pad=8;
+  const W=520, H=150, pad=8;
   const can = document.createElement("canvas"); can.width=W; can.height=H;
   const ctx = can.getContext("2d");
   ctx.fillStyle="rgba(255,255,255,0.05)"; ctx.fillRect(0,0,W,H);
@@ -383,7 +412,7 @@ function drawHistogram(gray, width, height, cx, cy, r){
       }
     }
   }
-  const W=420, H=130, pad=8;
+  const W=520, H=150, pad=8;
   const can = document.createElement("canvas"); can.width=W; can.height=H;
   const ctx = can.getContext("2d");
   ctx.fillStyle="rgba(255,255,255,0.05)"; ctx.fillRect(0,0,W,H);
@@ -403,16 +432,6 @@ async function canvasToURL(can){
   const b = await new Promise(res=>can.toBlob(res, "image/png"));
   return URL.createObjectURL(b);
 }
-function rotateCanvas180(source){
-  const can = document.createElement("canvas");
-  can.width = source.width; can.height = source.height;
-  const ctx = can.getContext("2d");
-  ctx.translate(can.width/2, can.height/2);
-  ctx.rotate(Math.PI);
-  ctx.drawImage(source, -source.width/2, -source.height/2);
-  return can;
-}
-// Pearson correlation
 function corr(a,b){
   const n = Math.min(a.length, b.length);
   let sx=0, sy=0, sxx=0, syy=0, sxy=0;
@@ -425,11 +444,11 @@ function corr(a,b){
   const vx = sxx/n - (sx/n)*(sx/n);
   const vy = syy/n - (sy/n)*(sy/n);
   const denom = Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12));
-  return denom>0? clamp01((cov/denom + 1)/2) : 0; // map -1..1 -> 0..1 for readability
+  return denom>0? clamp01((cov/denom + 1)/2) : 0;
 }
 
-// Analyze single image -> returns item
-async function analyzeImageFile(file, opts={}){
+// Analizar imagen (cara puck o huella)
+async function analyzeImageFile(file){
   const img = await fileToImageBitmap(file);
   const { canvas } = drawToCanvas(img, MAX_DIM);
   const id = getImageData(canvas);
@@ -451,109 +470,129 @@ async function analyzeImageFile(file, opts={}){
   const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
   const guides = drawGuides(cropped.width, r, 12);
 
+  // Dark ring (annulus)
+  const ring = detectDarkRing(stats.profile, [0.78,0.96]);
+  const ringDepth = (stats.mid - ring.minV); // >0 => más oscuro que el medio
+  const ringOverlay = drawRingOverlay(cropped.width, r, ring.pos, 0.06);
+
   // charts
   const profileChart = drawProfileChart(Array.from(stats.profile));
   const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
   // urls
-  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, profileURL, histURL] = await Promise.all([
+  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
     canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
-    canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(profileChart), canvasToURL(histChart)
+    canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
+    canvasToURL(profileChart), canvasToURL(histChart)
   ]);
 
   return {
-    name: file.name,
     dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
-    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, profileURL, histURL },
+    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL },
     metrics: {
       eci: stats.eci,
       extremes: ext.ratio,
       sectorStd: sectors.std,
-      edgeDensity: edges.density
+      edgeDensity: edges.density,
+      ringDepth,
+      ringPos: ring.pos
     },
     arrays: { sectorMeans: sectors.means, radialProfile: stats.profile }
   };
 }
 
-// Pair recommendations
-function pairRecommendations(front, back, pair){
+function pairRecommendations(top, bottom, pair){
   const L = [];
   const B = [];
 
-  L.push(`• ECI frontal: ${round(front.metrics.eci)} | ECI trasera: ${round(back.metrics.eci)} (Δ=${round(front.metrics.eci - back.metrics.eci)})`);
-  L.push(`• Extremos front/back: ${round(front.metrics.extremes*100)}% / ${round(back.metrics.extremes*100)}%`);
-  L.push(`• σ sectores front/back: ${round(front.metrics.sectorStd)} / ${round(back.metrics.sectorStd)}`);
-  L.push(`• Densidad grietas front/back: ${round(front.metrics.edgeDensity*100)}% / ${round(back.metrics.edgeDensity*100)}%`);
-  L.push(`• Correlación sectores (ajustada rotación): ${round(pair.sectorCorr*100)}%`);
+  L.push(`• ECI superior: ${round(top.metrics.eci)} | inferior: ${round(bottom.metrics.eci)} (Δ=${round(top.metrics.eci - bottom.metrics.eci)})`);
+  L.push(`• Extremos sup/inf: ${round(top.metrics.extremes*100)}% / ${round(bottom.metrics.extremes*100)}%`);
+  L.push(`• σ sectores sup/inf: ${round(top.metrics.sectorStd)} / ${round(bottom.metrics.sectorStd)}`);
+  L.push(`• Grietas sup/inf: ${round(top.metrics.edgeDensity*100)}% / ${round(bottom.metrics.edgeDensity*100)}%`);
+  L.push(`• Anillo oscuro (inf): profundidad ${round(bottom.metrics.ringDepth)} @ r≈${Math.round(bottom.metrics.ringPos*100)}%`);
+  L.push(`• Correlación sectores (ajustada rotación): ${Math.round(pair.sectorCorr*100)}%`);
 
   if (pair.sectorCorr>0.65){
-    B.push("Canales atravesando el puck: sectores problemáticos coinciden en ambas caras. Refuerza WDT profundo, preinfusión suave y revisa nivelación.");
+    B.push("Canales atraviesan el puck (coinciden sectores). WDT profundo y uniforme, preinfusión suave, verifica nivelación del tamper.");
   }
-  if (back.metrics.extremes > front.metrics.extremes + 0.05){
-    B.push("La parte trasera muestra más extremos (posibles huecos): revisa compactado y evita golpeteos del portafiltro tras el tamper.");
+  if (bottom.metrics.ringDepth>0.02){
+    B.push("Anillo oscuro en la cara inferior: posible bypass por la periferia. Revisa headspace, diámetro del tamper (ajustado), y valora filtro de papel inferior.");
   }
-  if (front.metrics.eci > 0.1){
-    B.push("Periferia frontal más clara que el centro: posible bypass por paredes. Revisa headspace y diámetro del tamper (ajustado a la cesta).");
+  if (bottom.metrics.edgeDensity > top.metrics.edgeDensity + 0.03){
+    B.push("Más grietas en inferior: reduce golpes post-tamper, baja el ramp‑up de presión y evalúa paper filter abajo.");
   }
-  if (back.metrics.edgeDensity > 0.08){
-    B.push("Alta densidad de grietas en la trasera: usa paper filter (abajo) o reduce el ramp-up de presión.");
+  if (top.metrics.extremes > bottom.metrics.extremes + 0.05){
+    B.push("La cara superior presenta más extremos: mejora la distribución antes del tamper (WDT 10–15 s, romper grumos, RDT si hay estática).");
   }
   if (B.length===0){
-    B.push("Puck consistente en ambas caras. Mantén parámetros y afina ratio/tiempo según sabor.");
+    B.push("Puck consistente entre caras. Mantén parámetros y ajusta fino ratio/tiempo por sabor.");
   }
   return { lines: L, bullets: B };
+}
+
+function downloadBlob(filename, blob){
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = filename;
+  a.click();
+  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
 }
 
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false });
-  const [rotateBack, setRotateBack] = useState(true); // flip 180° para alinear caras
-  const frontRef = useRef(); const backRef = useRef();
+  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true });
+  const [rotateBack, setRotateBack] = useState(true); // 180° al comparar sectores
+  const topRef = useRef(); const bottomRef = useRef();
+  const topPrintRef = useRef(); const bottomPrintRef = useRef(); // huellas en papel (opcional)
 
   async function addSet(){
-    const f = frontRef.current.files?.[0];
-    const b = backRef.current.files?.[0];
-    if(!f || !b){ alert("Sube una imagen frontal y otra trasera."); return; }
+    const fTop = topRef.current.files?.[0];
+    const fBottom = bottomRef.current.files?.[0];
+    if(!fTop || !fBottom){ alert("Sube una imagen SUPERIOR y otra INFERIOR del puck."); return; }
     setBusy(true);
     try{
-      const [front, back0] = await Promise.all([analyzeImageFile(f), analyzeImageFile(b)]);
-      const back = rotateBack ? await (async ()=>{
-        // rotamos solo para presentación y para el cálculo sectorial
-        const imgEl = new Image();
-        imgEl.src = back0.urls.croppedURL;
-        await imgEl.decode().catch(()=>{});
-        // load canvas from url
-        const res = await fetch(back0.urls.croppedURL); const blob = await res.blob();
+      const [top, bottomRaw] = await Promise.all([analyzeImageFile(fTop), analyzeImageFile(fBottom)]);
+
+      // rotación inferior para comparación de sectores
+      let bottom = bottomRaw;
+      if (rotateBack){
+        const imgRes = await fetch(bottomRaw.urls.croppedURL);
+        const blob = await imgRes.blob();
         const bmp = await createImageBitmap(blob);
-        // draw to canvas and rotate
         const tmp = document.createElement("canvas");
         tmp.width = bmp.width; tmp.height = bmp.height;
         const ctx = tmp.getContext("2d");
         ctx.translate(tmp.width/2, tmp.height/2);
         ctx.rotate(Math.PI);
         ctx.drawImage(bmp, -bmp.width/2, -bmp.height/2);
-        // replace only the cropped image URL for visual alignment
-        const rotatedURL = await canvasToURL(tmp);
-        // rotate overlays similarly (guides identical, sectors/edges/heatmap are symmetric; for simplicity mostramos base rotada)
-        return { ...back0, urls: { ...back0.urls, croppedURL: rotatedURL } };
-      })() : back0;
-
-      // sector correlation (with optional reversal of index to simulate 180°)
-      const a = Array.from(front.arrays.sectorMeans);
-      let bMeans = Array.from(back0.arrays.sectorMeans);
-      if (rotateBack){
-        // shift by half circle ~ reverse order
-        bMeans = bMeans.slice().reverse();
+        const rotatedURL = await (async()=>{
+          const b = await new Promise(res=>tmp.toBlob(res, "image/png"));
+          return URL.createObjectURL(b);
+        })();
+        bottom = { ...bottomRaw, urls: { ...bottomRaw.urls, croppedURL: rotatedURL } };
       }
-      const sectorCorr = corr(a, bMeans);
+
+      // correlación sectorial (ajustada)
+      const a = Array.from(top.arrays.sectorMeans);
+      let b = Array.from(bottomRaw.arrays.sectorMeans);
+      if (rotateBack) b = b.slice().reverse();
+      const sectorCorr = corr(a,b);
 
       const pair = { sectorCorr };
-      const rec = pairRecommendations(front, back0, pair);
+      const rec = pairRecommendations(top, bottomRaw, pair);
 
-      setSets(prev=>[...prev, { front, back, backRaw: back0, pair, rec }]);
-      frontRef.current.value = null;
-      backRef.current.value = null;
+      // Huellas en papel (opcionales)
+      let topPrint = null, bottomPrint = null;
+      const fTopP = topPrintRef.current.files?.[0];
+      const fBottomP = bottomPrintRef.current.files?.[0];
+      if (fTopP) topPrint = await analyzeImageFile(fTopP);
+      if (fBottomP) bottomPrint = await analyzeImageFile(fBottomP);
+
+      setSets(prev=>[...prev, { top, bottom, bottomRaw, pair, rec, topPrint, bottomPrint }]);
+      topRef.current.value = null; bottomRef.current.value = null;
+      if (topPrintRef.current) topPrintRef.current.value = null;
+      if (bottomPrintRef.current) bottomPrintRef.current.value = null;
     } finally {
       setBusy(false);
     }
@@ -564,7 +603,10 @@ export default function App(){
       <div className="row" style={{justifyContent:"space-between", alignItems:"flex-start", gap:16}}>
         <div>
           <h1 style={{margin:"0 0 6px 0"}}>Puck Diagnosis</h1>
-          <div className="muted">Sube <b>dos fotos por puck</b>: <span className="tag">Frontal</span> y <span className="tag">Trasera</span>. La app recorta, centra y analiza ambas.</div>
+          <div className="muted">Sube <b>dos fotos por puck</b> con estas definiciones:
+            <span className="tag" style={{marginLeft:8}}>Superior = lado que toca la ducha / group head</span>
+            <span className="tag">Inferior = lado que toca la canasta/boquilla</span>
+          </div>
         </div>
         <div className="row">
           <label className="row small" style={{gap:8}}>
@@ -573,7 +615,7 @@ export default function App(){
           </label>
           <label className="row small" style={{gap:8}}>
             <input type="checkbox" checked={overlay.guides} onChange={e=>setOverlay(o=>({...o, guides:e.target.checked}))} />
-            <span>Líneas guía</span>
+            <span>Guías</span>
           </label>
           <label className="row small" style={{gap:8}}>
             <input type="checkbox" checked={overlay.edges} onChange={e=>setOverlay(o=>({...o, edges:e.target.checked}))} />
@@ -583,27 +625,40 @@ export default function App(){
             <input type="checkbox" checked={overlay.sectors} onChange={e=>setOverlay(o=>({...o, sectors:e.target.checked}))} />
             <span>Sectores</span>
           </label>
+          <label className="row small" style={{gap:8}}>
+            <input type="checkbox" checked={overlay.ring} onChange={e=>setOverlay(o=>({...o, ring:e.target.checked}))} />
+            <span>Anillo oscuro</span>
+          </label>
         </div>
       </div>
 
       <div style={{height:12}} />
 
       <div className="card">
-        <div className="row" style={{justifyContent:"space-between"}}>
-          <div className="row" style={{gap:16}}>
+        <div className="row" style={{justifyContent:"space-between", alignItems:"center"}}>
+          <div className="row" style={{gap:16, alignItems:"center"}}>
             <div>
-              <div className="small">Frontal</div>
-              <input ref={frontRef} type="file" accept="image/*" />
+              <div className="small" title="Lado que toca la ducha / group head">Superior (group head)</div>
+              <input ref={topRef} type="file" accept="image/*" />
             </div>
             <div>
-              <div className="small">Trasera</div>
-              <input ref={backRef} type="file" accept="image/*" />
+              <div className="small" title="Lado que toca la canasta/boquilla">Inferior (canasta)</div>
+              <input ref={bottomRef} type="file" accept="image/*" />
+            </div>
+            <div className="muted small" style={{marginLeft:8}}>Huellas en papel (opcional):</div>
+            <div>
+              <div className="small">Superior (papel)</div>
+              <input ref={topPrintRef} type="file" accept="image/*" />
+            </div>
+            <div>
+              <div className="small">Inferior (papel)</div>
+              <input ref={bottomPrintRef} type="file" accept="image/*" />
             </div>
           </div>
           <div className="row" style={{gap:16}}>
             <label className="row small" style={{gap:8}}>
               <input type="checkbox" checked={rotateBack} onChange={e=>setRotateBack(e.target.checked)} />
-              <span>Rotar trasera 180°</span>
+              <span>Rotar inferior 180° para comparar</span>
             </label>
             <button className="btn" disabled={busy} onClick={addSet}>{busy? "Procesando..." : "Añadir set"}</button>
           </div>
@@ -612,14 +667,14 @@ export default function App(){
 
       <div style={{height:18}} />
 
-      <div className="grid">
+      <div className="sets">
         {sets.map((st, idx)=>(
           <div key={idx} className="card">
             <div style={{fontWeight:600}} className="small">Puck #{idx+1}</div>
 
-            {/* Two columns: front / back */}
-            <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:12, marginTop:10}}>
-              {[{lab:"Frontal", it: st.front}, {lab:"Trasera", it: st.back}].map((obj, k)=>(
+            {/* Dos columnas: superior / inferior */}
+            <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16, marginTop:10}}>
+              {[{lab:"Superior (group head)", it: st.top}, {lab:"Inferior (canasta)", it: st.bottom}].map((obj, k)=>(
                 <div key={k}>
                   <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
                   <div className="thumb canvas-stack">
@@ -628,6 +683,7 @@ export default function App(){
                     {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
                     {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
                     {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                    {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
                   </div>
 
                   <div style={{height:8}} />
@@ -636,6 +692,7 @@ export default function App(){
                     <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
                     <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
                     <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
+                    <div>Anillo oscuro (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
                   </div>
 
                   <div className="charts">
@@ -645,6 +702,36 @@ export default function App(){
                 </div>
               ))}
             </div>
+
+            {/* Huellas en papel (opcionales) */}
+            {(st.topPrint || st.bottomPrint) && (
+              <>
+                <div style={{height:12}} />
+                <div className="small" style={{fontWeight:700}}>Huellas en papel</div>
+                <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16, marginTop:8}}>
+                  {st.topPrint && (
+                    <div>
+                      <div className="small" style={{fontWeight:700, marginBottom:6}}>Superior (papel)</div>
+                      <div className="thumb canvas-stack">
+                        <img src={st.topPrint.urls.croppedURL} alt="huella sup" />
+                        {overlay.sectors && <img className="overlay" src={st.topPrint.urls.sectorURL} alt="sectors" />}
+                        {overlay.ring && <img className="overlay" src={st.topPrint.urls.ringURL} alt="ring" />}
+                      </div>
+                    </div>
+                  )}
+                  {st.bottomPrint && (
+                    <div>
+                      <div className="small" style={{fontWeight:700, marginBottom:6}}>Inferior (papel)</div>
+                      <div className="thumb canvas-stack">
+                        <img src={st.bottomPrint.urls.croppedURL} alt="huella inf" />
+                        {overlay.sectors && <img className="overlay" src={st.bottomPrint.urls.sectorURL} alt="sectors" />}
+                        {overlay.ring && <img className="overlay" src={st.bottomPrint.urls.ringURL} alt="ring" />}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </>
+            )}
 
             <div style={{height:12}} />
 
@@ -669,7 +756,8 @@ export default function App(){
 
       <div style={{height:24}} />
       <div className="muted small">
-        * Recomendado: mismas condiciones de luz y orientación entre la cara frontal y trasera. Usa “Rotar trasera 180°” si volteaste el puck.
+        * Definiciones: <b>Superior</b> = lado contra la ducha (group head). <b>Inferior</b> = lado hacia la canasta/boquilla.<br/>
+        * Sube también las <b>huellas en papel</b> (superior e inferior) para reforzar el diagnóstico de bypass/anillos.
       </div>
     </div>
   );
