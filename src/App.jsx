@@ -1,5 +1,6 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useState, useRef } from "react";
 
+// ==== Helpers & core from v0.3.1 (simplified here, same logic) ====
 const MAX_DIM = 1024;
 function clamp01(x){ return Math.min(1, Math.max(0, x)); }
 function lerp(a,b,t){ return a+(b-a)*t; }
@@ -134,7 +135,6 @@ function polarStats(gray, width, height, cx, cy, r) {
   return { profile: prof, eci, mid, edge };
 }
 function localVariance(gray, width, height, cx, cy, r, blocks=64) {
-  // create block grid that matches cropped size exactly
   const wBlocks = blocks, hBlocks = blocks;
   const bw = Math.floor(width / wBlocks);
   const bh = Math.floor(height / hBlocks);
@@ -216,16 +216,13 @@ function sobel(gray, width, height){
       mag[y*width+x] = m;
     }
   }
-  // stats
   let s=0, s2=0, c=0;
   for (let i=0;i<mag.length;i++){ const v=mag[i]; if (v>0){ s+=v; s2+=v*v; c++; } }
   const mean = c? s/c : 0;
   const std = c? Math.sqrt(Math.max(s2/c - mean*mean, 1e-8)) : 1;
   return { mag, mean, std };
 }
-
 function drawHeatmapCanvas(varmap, wBlocks, hBlocks, vmax, bw, bh, width, height) {
-  // Render directly at cropped size to ensure 1:1 with base
   const can = document.createElement("canvas");
   can.width = width; can.height = height;
   const ctx = can.getContext("2d");
@@ -299,7 +296,6 @@ function drawEdgesOverlay(gray, width, height, cx, cy, r){
   return { can, thr, mean, std, density };
 }
 function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
-  // Compute sector deviations and draw legend
   const sums = new Float64Array(sectors);
   const cnts = new Uint32Array(sectors);
   for (let y=0;y<height;y++){
@@ -321,7 +317,6 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   let s2=0;
   for (let i=0;i<sectors;i++){ const d=means[i]-globalMean; s2 += d*d; }
   const std = Math.sqrt(Math.max(s2/sectors, 1e-8));
-
   const can = document.createElement("canvas");
   can.width = width; can.height = height;
   const ctx = can.getContext("2d");
@@ -331,7 +326,7 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   for (let k=0;k<sectors;k++){
     const dev = means[k]-globalMean;
     const t = clamp01(Math.abs(dev) / (std*1.2 + 1e-6));
-    let color = dev>0 ? `rgba(59,130,246,${0.25 + 0.5*t})` : `rgba(239,68,68,${0.25 + 0.5*t})`; // blue=claro, red=oscuro
+    let color = dev>0 ? `rgba(59,130,246,${0.25 + 0.5*t})` : `rgba(239,68,68,${0.25 + 0.5*t})`;
     ctx.fillStyle = color;
     ctx.beginPath();
     ctx.moveTo(0,0);
@@ -351,13 +346,11 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
   ctx.font="12px ui-sans-serif"; ctx.fillStyle="rgba(255,255,255,0.85)";
   ctx.fillText("Mapa de sectores (desv. angular)", pad+8, pad+16);
   ctx.fillStyle="rgba(239,68,68,0.9)"; ctx.fillRect(pad+8, pad+24, 16, 12);
-  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("rojo: más oscuro (densidad/atascos)", pad+28, pad+34);
+  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("rojo: más oscuro (atascos)", pad+28, pad+34);
   ctx.fillStyle="rgba(59,130,246,0.9)"; ctx.fillRect(pad+8, pad+38, 16, 12);
-  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("azul: más claro (flujos rápidos)", pad+28, pad+48);
-
+  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("azul: más claro (flujo rápido)", pad+28, pad+48);
   return { can, means, globalMean, std };
 }
-
 function drawProfileChart(profile){
   const W=420, H=130, pad=8;
   const can = document.createElement("canvas"); can.width=W; can.height=H;
@@ -406,157 +399,172 @@ function drawHistogram(gray, width, height, cx, cy, r){
   ctx.fillText("Histograma de intensidades (puck)", 10, 16);
   return can;
 }
-
-function getRecommendations({eci, extremes, sectorStd, edgeDensity, offCenter, r}){
-  const lines = [];
-  const bullets = [];
-
-  lines.push(`• Δ borde-centro (ECI): ${round(eci)} — ${Math.abs(eci)>0.08 ? "alto" : "moderado/bajo"}.`);
-  lines.push(`• Extremos tonales: ${round(extremes*100)}% — ${extremes>0.12 ? "muchos extremos" : "controlado"}.`);
-  lines.push(`• Desv. sectores: ${round(sectorStd)} — ${sectorStd>0.03 ? "asimetrías angulares" : "uniforme"}.`);
-  lines.push(`• Densidad de grietas: ${round(edgeDensity*100)}% de píxeles — ${edgeDensity>0.06 ? "elevada" : "normal"}.`);
-  if (offCenter>r*0.06) lines.push(`• Desalineación: centro del puck desplazado ${Math.round(offCenter)} px — revisar distribución/tamper.`);
-
-  // Priorizar en función de qué métrica domina
-  if (Math.abs(eci) > 0.10){
-    bullets.push("Refuerza la distribución en la periferia: WDT fino 10–15 s, sacudidas suaves para asentar, verifica nivelado antes del tamper.");
-    bullets.push("Revisa la relación dosis/cesta: evita headspace excesivo o sobrellenado que empuja flujo hacia las paredes.");
-    bullets.push("Ensayo de preinfusión 3–6 s a baja presión para empapar uniformemente antes del ramp-up.");
+async function canvasToURL(can){
+  const b = await new Promise(res=>can.toBlob(res, "image/png"));
+  return URL.createObjectURL(b);
+}
+function rotateCanvas180(source){
+  const can = document.createElement("canvas");
+  can.width = source.width; can.height = source.height;
+  const ctx = can.getContext("2d");
+  ctx.translate(can.width/2, can.height/2);
+  ctx.rotate(Math.PI);
+  ctx.drawImage(source, -source.width/2, -source.height/2);
+  return can;
+}
+// Pearson correlation
+function corr(a,b){
+  const n = Math.min(a.length, b.length);
+  let sx=0, sy=0, sxx=0, syy=0, sxy=0;
+  for (let i=0;i<n;i++){
+    const x=a[i], y=b[i];
+    sx += x; sy += y;
+    sxx += x*x; syy += y*y; sxy += x*y;
   }
-  if (extremes > 0.15){
-    bullets.push("Homogeneiza la molienda: pequeños cambios en el dial (±0.5–1 clic) y verifica presencia de grumos; aplica RDT para reducir estática.");
-    bullets.push("Compactado consistente: tamper recto, presión estable; considera un nivelador previo si hay desniveles visibles.");
-  }
-  if (sectorStd > 0.035){
-    bullets.push("Gira el portafiltro 90° entre fotos para verificar si la asimetría rota (máquina) o permanece (preparación).");
-    bullets.push("Evalúa distribución radial: inserta WDT más profundo en sectores 'rojos' (oscuros) identificados.");
-  }
-  if (edgeDensity > 0.07){
-    bullets.push("Atiende microfisuras: suaviza el grooming superficial, evita golpeteos fuertes del portafiltro tras el tamper.");
-    bullets.push("Si usas paper filter, prueba colocarlo arriba/abajo para amortiguar jetting inicial.");
-  }
-  if (offCenter>r*0.06){
-    bullets.push("Verifica que el tamper entre ajustado a la cesta y apoya perpendicular al borde.");
-    bullets.push("Revisa nivel de la mesa/máquina; una ligera inclinación puede sesgar el flujo.");
-  }
-  if (bullets.length===0){
-    bullets.push("Puck homogéneo: mantén parámetros. Explora ajustes finos de ratio/tiempo para optimizar sabor sin comprometer uniformidad.");
-  }
-  return { lines, bullets };
+  const cov = sxy/n - (sx/n)*(sy/n);
+  const vx = sxx/n - (sx/n)*(sx/n);
+  const vy = syy/n - (sy/n)*(sy/n);
+  const denom = Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12));
+  return denom>0? clamp01((cov/denom + 1)/2) : 0; // map -1..1 -> 0..1 for readability
 }
 
-function downloadBlob(filename, blob){
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = filename;
-  a.click();
-  setTimeout(()=>URL.revokeObjectURL(a.href), 1000);
+// Analyze single image -> returns item
+async function analyzeImageFile(file, opts={}){
+  const img = await fileToImageBitmap(file);
+  const { canvas } = drawToCanvas(img, MAX_DIM);
+  const id = getImageData(canvas);
+  const g = grayscale(id);
+  const m = darkMask(g, 0.35);
+  const c = centroid(m.mask, m.width, m.height);
+  const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
+  const cropped = cropCircle(canvas, c.cx, c.cy, r, 1.18);
+
+  const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
+  const cg = grayscale(cid);
+  const centerX = cropped.width/2, centerY = cropped.height/2;
+
+  const stats = polarStats(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const lv = localVariance(cg.gray, cg.width, cg.height, centerX, centerY, r, 64);
+  const ext = extremesRatio(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const edges = drawEdgesOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const sectors = drawSectorsOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r, 24);
+  const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
+  const guides = drawGuides(cropped.width, r, 12);
+
+  // charts
+  const profileChart = drawProfileChart(Array.from(stats.profile));
+  const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
+
+  // urls
+  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, profileURL, histURL] = await Promise.all([
+    canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
+    canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(profileChart), canvasToURL(histChart)
+  ]);
+
+  return {
+    name: file.name,
+    dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
+    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, profileURL, histURL },
+    metrics: {
+      eci: stats.eci,
+      extremes: ext.ratio,
+      sectorStd: sectors.std,
+      edgeDensity: edges.density
+    },
+    arrays: { sectorMeans: sectors.means, radialProfile: stats.profile }
+  };
+}
+
+// Pair recommendations
+function pairRecommendations(front, back, pair){
+  const L = [];
+  const B = [];
+
+  L.push(`• ECI frontal: ${round(front.metrics.eci)} | ECI trasera: ${round(back.metrics.eci)} (Δ=${round(front.metrics.eci - back.metrics.eci)})`);
+  L.push(`• Extremos front/back: ${round(front.metrics.extremes*100)}% / ${round(back.metrics.extremes*100)}%`);
+  L.push(`• σ sectores front/back: ${round(front.metrics.sectorStd)} / ${round(back.metrics.sectorStd)}`);
+  L.push(`• Densidad grietas front/back: ${round(front.metrics.edgeDensity*100)}% / ${round(back.metrics.edgeDensity*100)}%`);
+  L.push(`• Correlación sectores (ajustada rotación): ${round(pair.sectorCorr*100)}%`);
+
+  if (pair.sectorCorr>0.65){
+    B.push("Canales atravesando el puck: sectores problemáticos coinciden en ambas caras. Refuerza WDT profundo, preinfusión suave y revisa nivelación.");
+  }
+  if (back.metrics.extremes > front.metrics.extremes + 0.05){
+    B.push("La parte trasera muestra más extremos (posibles huecos): revisa compactado y evita golpeteos del portafiltro tras el tamper.");
+  }
+  if (front.metrics.eci > 0.1){
+    B.push("Periferia frontal más clara que el centro: posible bypass por paredes. Revisa headspace y diámetro del tamper (ajustado a la cesta).");
+  }
+  if (back.metrics.edgeDensity > 0.08){
+    B.push("Alta densidad de grietas en la trasera: usa paper filter (abajo) o reduce el ramp-up de presión.");
+  }
+  if (B.length===0){
+    B.push("Puck consistente en ambas caras. Mantén parámetros y afina ratio/tiempo según sabor.");
+  }
+  return { lines: L, bullets: B };
 }
 
 export default function App(){
-  const [items, setItems] = useState([]);
+  const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [overlay, setOverlay] = useState({
-    heatmap: false,
-    guides: true,
-    edges: true,
-    sectors: false
-  });
+  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false });
+  const [rotateBack, setRotateBack] = useState(true); // flip 180° para alinear caras
+  const frontRef = useRef(); const backRef = useRef();
 
-  const onFiles = useCallback(async (files)=>{
+  async function addSet(){
+    const f = frontRef.current.files?.[0];
+    const b = backRef.current.files?.[0];
+    if(!f || !b){ alert("Sube una imagen frontal y otra trasera."); return; }
     setBusy(true);
-    const arr = [];
-    for (const file of files){
-      try {
-        const img = await fileToImageBitmap(file);
-        const { canvas } = drawToCanvas(img, MAX_DIM);
-        const id = getImageData(canvas);
-        const g = grayscale(id);
-        const m = darkMask(g, 0.35);
-        const c = centroid(m.mask, m.width, m.height);
-        const r = robustRadius(m.mask, m.width, m.height, c.cx, c.cy);
-        const cropped = cropCircle(canvas, c.cx, c.cy, r, 1.18);
+    try{
+      const [front, back0] = await Promise.all([analyzeImageFile(f), analyzeImageFile(b)]);
+      const back = rotateBack ? await (async ()=>{
+        // rotamos solo para presentación y para el cálculo sectorial
+        const imgEl = new Image();
+        imgEl.src = back0.urls.croppedURL;
+        await imgEl.decode().catch(()=>{});
+        // load canvas from url
+        const res = await fetch(back0.urls.croppedURL); const blob = await res.blob();
+        const bmp = await createImageBitmap(blob);
+        // draw to canvas and rotate
+        const tmp = document.createElement("canvas");
+        tmp.width = bmp.width; tmp.height = bmp.height;
+        const ctx = tmp.getContext("2d");
+        ctx.translate(tmp.width/2, tmp.height/2);
+        ctx.rotate(Math.PI);
+        ctx.drawImage(bmp, -bmp.width/2, -bmp.height/2);
+        // replace only the cropped image URL for visual alignment
+        const rotatedURL = await canvasToURL(tmp);
+        // rotate overlays similarly (guides identical, sectors/edges/heatmap are symmetric; for simplicity mostramos base rotada)
+        return { ...back0, urls: { ...back0.urls, croppedURL: rotatedURL } };
+      })() : back0;
 
-        // analysis in cropped coordinates
-        const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
-        const cg = grayscale(cid);
-        const centerX = cropped.width/2, centerY = cropped.height/2;
-
-        const stats = polarStats(cg.gray, cg.width, cg.height, centerX, centerY, r);
-        const lv = localVariance(cg.gray, cg.width, cg.height, centerX, centerY, r, 64);
-        const ext = extremesRatio(cg.gray, cg.width, cg.height, centerX, centerY, r);
-        const edges = drawEdgesOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r);
-        const sectors = drawSectorsOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r, 24);
-        const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
-        const guides = drawGuides(cropped.width, r, 12);
-
-        // centroid offset (using original mask center projected into cropped coords)
-        const offCenter = Math.hypot((c.cx - (cropped.width/2)), (c.cy - (cropped.height/2))); // after crop centerizing, this should be small; but we keep metric
-
-        // charts
-        const profileChart = drawProfileChart(Array.from(stats.profile));
-        const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
-
-        // blobs/urls
-        const toURL = async (can)=>{
-          const b = await new Promise(res=>can.toBlob(res, "image/png"));
-          return URL.createObjectURL(b);
-        };
-        const croppedURL = await toURL(cropped);
-        const hmURL = await toURL(heatmap);
-        const edgeURL = await toURL(edges.can);
-        const sectorURL = await toURL(sectors.can);
-        const guideURL = await toURL(guides);
-        const profileURL = await toURL(profileChart);
-        const histURL = await toURL(histChart);
-
-        const rec = getRecommendations({
-          eci: stats.eci,
-          extremes: ext.ratio,
-          sectorStd: sectors.std,
-          edgeDensity: edges.density,
-          offCenter,
-          r
-        });
-
-        arr.push({
-          name: file.name,
-          dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
-          urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, profileURL, histURL },
-          metrics: {
-            eci: stats.eci,
-            extremes: ext.ratio,
-            sectorStd: sectors.std,
-            edgeDensity: edges.density,
-            offCenter
-          },
-          rec
-        });
-      } catch (e){
-        console.error(e);
-        arr.push({ name: file.name, error: String(e) });
+      // sector correlation (with optional reversal of index to simulate 180°)
+      const a = Array.from(front.arrays.sectorMeans);
+      let bMeans = Array.from(back0.arrays.sectorMeans);
+      if (rotateBack){
+        // shift by half circle ~ reverse order
+        bMeans = bMeans.slice().reverse();
       }
-    }
-    setItems(prev=>[...prev, ...arr]);
-    setBusy(false);
-  },[]);
+      const sectorCorr = corr(a, bMeans);
 
-  const handleDrop = (e)=>{
-    e.preventDefault();
-    const files = Array.from(e.dataTransfer.files || []).filter(f=>f.type.startsWith("image/"));
-    onFiles(files);
-  };
-  const handleBrowse = (e)=>{
-    const files = Array.from(e.target.files || []).filter(f=>f.type.startsWith("image/"));
-    onFiles(files);
-  };
+      const pair = { sectorCorr };
+      const rec = pairRecommendations(front, back0, pair);
+
+      setSets(prev=>[...prev, { front, back, backRaw: back0, pair, rec }]);
+      frontRef.current.value = null;
+      backRef.current.value = null;
+    } finally {
+      setBusy(false);
+    }
+  }
 
   return (
     <div className="container">
       <div className="row" style={{justifyContent:"space-between", alignItems:"flex-start", gap:16}}>
         <div>
           <h1 style={{margin:"0 0 6px 0"}}>Puck Diagnosis</h1>
-          <div className="muted">Recorte y centrado automáticos; análisis con overlays 1:1 sobre el puck.</div>
+          <div className="muted">Sube <b>dos fotos por puck</b>: <span className="tag">Frontal</span> y <span className="tag">Trasera</span>. La app recorta, centra y analiza ambas.</div>
         </div>
         <div className="row">
           <label className="row small" style={{gap:8}}>
@@ -575,26 +583,29 @@ export default function App(){
             <input type="checkbox" checked={overlay.sectors} onChange={e=>setOverlay(o=>({...o, sectors:e.target.checked}))} />
             <span>Sectores</span>
           </label>
-          <button className="btn" disabled={busy} onClick={()=>document.getElementById("file-input").click()}>
-            {busy? "Procesando..." : "Seleccionar imágenes"}
-          </button>
-          <input id="file-input" type="file" accept="image/*" multiple style={{display:"none"}} onChange={handleBrowse} />
         </div>
       </div>
 
-      <div style={{height:16}} />
+      <div style={{height:12}} />
 
       <div className="card">
-        <div className="drop" onDrop={handleDrop} onDragOver={(e)=>e.preventDefault()}>
-          <div style={{fontWeight:700, fontSize:18, marginBottom:6}}>Arrastra y suelta imágenes aquí</div>
-          <div className="muted">o usa <span className="kbd">Seleccionar imágenes</span>. Formatos: PNG/JPG.</div>
-          <div style={{height:8}} />
-          <div className="row">
-            <span className="tag">Recorte + centrado</span>
-            <span className="tag">Fondo transparente</span>
-            <span className="tag">Heatmap</span>
-            <span className="tag">Grietas (Sobel)</span>
-            <span className="tag">Guías + Sectores (con leyenda)</span>
+        <div className="row" style={{justifyContent:"space-between"}}>
+          <div className="row" style={{gap:16}}>
+            <div>
+              <div className="small">Frontal</div>
+              <input ref={frontRef} type="file" accept="image/*" />
+            </div>
+            <div>
+              <div className="small">Trasera</div>
+              <input ref={backRef} type="file" accept="image/*" />
+            </div>
+          </div>
+          <div className="row" style={{gap:16}}>
+            <label className="row small" style={{gap:8}}>
+              <input type="checkbox" checked={rotateBack} onChange={e=>setRotateBack(e.target.checked)} />
+              <span>Rotar trasera 180°</span>
+            </label>
+            <button className="btn" disabled={busy} onClick={addSet}>{busy? "Procesando..." : "Añadir set"}</button>
           </div>
         </div>
       </div>
@@ -602,87 +613,63 @@ export default function App(){
       <div style={{height:18}} />
 
       <div className="grid">
-        {items.map((it, idx)=>(
+        {sets.map((st, idx)=>(
           <div key={idx} className="card">
-            <div className="row" style={{justifyContent:"space-between"}}>
-              <div style={{fontWeight:600}} className="small">{it.name}</div>
-              {!it.error && (
-                <div className="row small" style={{gap:8}}>
-                  <span className="muted">r={it.dim.r}px</span>
+            <div style={{fontWeight:600}} className="small">Puck #{idx+1}</div>
+
+            {/* Two columns: front / back */}
+            <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:12, marginTop:10}}>
+              {[{lab:"Frontal", it: st.front}, {lab:"Trasera", it: st.back}].map((obj, k)=>(
+                <div key={k}>
+                  <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
+                  <div className="thumb canvas-stack">
+                    <img src={obj.it.urls.croppedURL} alt={obj.lab} />
+                    {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
+                    {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                    {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
+                    {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                  </div>
+
+                  <div style={{height:8}} />
+                  <div className="metrics">
+                    <div>ECI: <span className="mono">{obj.it.metrics.eci.toFixed(3)}</span></div>
+                    <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
+                    <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                    <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
+                  </div>
+
+                  <div className="charts">
+                    <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                    <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
+                  </div>
                 </div>
-              )}
+              ))}
             </div>
 
-            {it.error ? (
-              <div className="err small" style={{marginTop:8}}>Error: {it.error}</div>
-            ) : (
-              <>
-                <div className="thumb canvas-stack" style={{marginTop:12}}>
-                  {/* Base siempre el recorte para alinear overlays 1:1 */}
-                  <img src={it.urls.croppedURL} alt="puck" />
-                  {/* Overlays opcionales, misma dimensión que el recorte */}
-                  {overlay.heatmap && <img className="overlay" src={it.urls.hmURL} alt="heatmap" />}
-                  {overlay.guides && <img className="overlay" src={it.urls.guideURL} alt="guides" />}
-                  {overlay.edges && <img className="overlay" src={it.urls.edgeURL} alt="edges" />}
-                  {overlay.sectors && <img className="overlay" src={it.urls.sectorURL} alt="sectors" />}
-                </div>
+            <div style={{height:12}} />
 
-                <div style={{height:10}} />
+            <div className="small">
+              <div style={{fontWeight:700, marginBottom:4}}>Análisis combinado</div>
+              <ul style={{marginTop:4, paddingLeft:18}}>
+                {st.rec.lines.map((n,i)=>(<li key={i}>{n}</li>))}
+              </ul>
+            </div>
 
-                <div className="metrics">
-                  <div>Δ Borde-Centro (ECI): <span className="mono">{it.metrics.eci.toFixed(3)}</span></div>
-                  <div>Extremos tonales: <span className="mono">{(it.metrics.extremes*100).toFixed(1)}%</span></div>
-                  <div>Desv. de sectores (σ): <span className="mono">{it.metrics.sectorStd.toFixed(3)}</span></div>
-                  <div>Densidad de grietas: <span className="mono">{(it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
-                </div>
+            <div style={{height:10}} />
 
-                <div className="charts">
-                  <div className="chart"><img src={it.urls.profileURL} alt="perfil radial" /></div>
-                  <div className="chart"><img src={it.urls.histURL} alt="histograma" /></div>
-                </div>
-
-                <div style={{height:10}} />
-
-                <div className="small">
-                  <div style={{fontWeight:700, marginBottom:4}}>Análisis</div>
-                  <ul style={{marginTop:4, paddingLeft:18}}>
-                    {it.rec.lines.map((n,i)=>(<li key={i}>{n}</li>))}
-                  </ul>
-                </div>
-
-                <div style={{height:10}} />
-
-                <div className="small">
-                  <div style={{fontWeight:700, marginBottom:4}}>Recomendaciones priorizadas</div>
-                  <ul style={{marginTop:0, paddingLeft:18}}>
-                    {it.rec.bullets.map((r,i)=>(<li key={i}>{r}</li>))}
-                  </ul>
-                </div>
-
-                <div style={{height:12}} />
-
-                <div className="row">
-                  <button className="btn" onClick={async ()=>{
-                    const resp = await fetch(it.urls.croppedURL);
-                    const blob = await resp.blob();
-                    downloadBlob(`puck-${idx+1}.png`, blob);
-                  }}>Descargar recorte</button>
-                  <button className="btn" onClick={async ()=>{
-                    const resp = await fetch(it.urls.hmURL);
-                    const blob = await resp.blob();
-                    downloadBlob(`puck-heatmap-${idx+1}.png`, blob);
-                  }}>Descargar heatmap</button>
-                </div>
-              </>
-            )}
+            <div className="small">
+              <div style={{fontWeight:700, marginBottom:4}}>Recomendaciones</div>
+              <ul style={{marginTop:0, paddingLeft:18}}>
+                {st.rec.bullets.map((r,i)=>(<li key={i}>{r}</li>))}
+              </ul>
+            </div>
           </div>
         ))}
       </div>
 
       <div style={{height:24}} />
       <div className="muted small">
-        * Overlays alineados 1:1 con el recorte. Leyenda incluida en el mapa de sectores.<br/>
-        Ajusta umbrales en <span className="kbd">src/App.jsx</span> según tus fotos.
+        * Recomendado: mismas condiciones de luz y orientación entre la cara frontal y trasera. Usa “Rotar trasera 180°” si volteaste el puck.
       </div>
     </div>
   );
