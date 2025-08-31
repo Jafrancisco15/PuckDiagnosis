@@ -1,7 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
-import { jsPDF } from "jspdf";
 
-/** =================== Utils =================== */
+/** =================== Utilidades =================== */
 const MAX_DIM = 1200;
 const clamp01 = x => Math.min(1, Math.max(0, x));
 const lerp = (a,b,t)=> a+(b-a)*t;
@@ -109,7 +108,7 @@ function polarStats(gray, width, height, cx, cy, r) {
   };
   const mid = ringAvg(0.45,0.65);
   const edge = ringAvg(0.90,0.99);
-  const eci = edge - mid;
+  const eci = edge - mid; // >0 = borde más claro; <0 = borde más oscuro
   return { profile: prof, eci, mid, edge, ringAvg };
 }
 function sobel(gray, width, height){
@@ -234,7 +233,7 @@ function drawRingOverlay(size, r, pos, band=0.06){
   const r2 = Math.min(r, rMid + band*r);
   ctx.fillStyle="rgba(168,85,247,0.28)";
   ctx.beginPath(); ctx.arc(cx, cy, r2, 0, Math.PI*2); ctx.arc(cx, cy, r1, 0, Math.PI*2, true); ctx.closePath(); ctx.fill();
-  ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(8, 8, 180, 20);
+  ctx.fillStyle="rgba(0,0,0,0.5)"; ctx.fillRect(8, 8, 220, 20);
   ctx.fillStyle="rgba(255,255,255,0.9)"; ctx.font="12px ui-sans-serif"; ctx.fillText("Anillo oscuro (estimado)", 12, 22);
   return can;
 }
@@ -268,11 +267,11 @@ function drawSectorsOverlay(gray, width, height, cx, cy, r, sectors=24){
     ctx.fillStyle=color; ctx.beginPath(); ctx.moveTo(0,0); const a0=k*step, a1=(k+1)*step; ctx.arc(0,0,r,a0,a1); ctx.closePath(); ctx.fill();
   }
   ctx.setTransform(1,0,0,1,0,0); ctx.globalAlpha=1;
-  const pad=8; ctx.fillStyle="rgba(0,0,0,0.45)"; ctx.fillRect(pad, pad, 230, 52);
-  ctx.strokeStyle="rgba(255,255,255,0.25)"; ctx.strokeRect(pad, pad, 230, 52);
+  const pad=8; ctx.fillStyle="rgba(0,0,0,0.45)"; ctx.fillRect(pad, pad, 260, 52);
+  ctx.strokeStyle="rgba(255,255,255,0.25)"; ctx.strokeRect(pad, pad, 260, 52);
   ctx.font="12px ui-sans-serif"; ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("Mapa de sectores (desv. angular)", pad+8, pad+16);
   ctx.fillStyle="rgba(239,68,68,0.9)"; ctx.fillRect(pad+8, pad+24, 16, 12);
-  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("rojo: más oscuro (atascos)", pad+28, pad+34);
+  ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("rojo: más oscuro (atasco)", pad+28, pad+34);
   ctx.fillStyle="rgba(59,130,246,0.9)"; ctx.fillRect(pad+8, pad+38, 16, 12);
   ctx.fillStyle="rgba(255,255,255,0.85)"; ctx.fillText("azul: más claro (flujo rápido)", pad+28, pad+48);
   return { can, means, globalMean, std };
@@ -303,73 +302,173 @@ function drawHistogram(gray, width, height, cx, cy, r){
 }
 async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
 
-// Extra: granularidad de molienda (fino vs grueso) y headspace heurístico
-function boxBlur1D(arr, w, h, r, horiz){
-  const out=new Float32Array(arr.length); const R=Math.max(1, Math.floor(r));
-  if (horiz){
-    for (let y=0;y<h;y++){
-      let s=0; for (let x=-R;x<=R;x++){ const xx=Math.min(w-1, Math.max(0,x)); s+=arr[y*w+xx]; }
-      for (let x=0;x<w;x++){
-        const i=y*w+x;
-        out[i]=s/(2*R+1);
-        const x0=x-R, x1=x+R+1;
-        s += arr[y*w + Math.min(w-1, x1)] - arr[y*w + Math.max(0, x0)];
-      }
-    }
-  } else {
-    for (let x=0;x<w;x++){
-      let s=0; for (let y=-R;y<=R;y++){ const yy=Math.min(h-1, Math.max(0,y)); s+=arr[yy*w+x]; }
-      for (let y=0;y<h;y++){
-        const i=y*w+x;
-        out[i]=s/(2*R+1);
-        const y0=y-R, y1=y+R+1;
-        s += arr[Math.min(h-1, y1)*w + x] - arr[Math.max(0, y0)*w + x];
-      }
-    }
-  }
-  return out;
-}
-function blur(arr, w, h, r, it=2){
-  let tmp=arr;
-  for (let k=0;k<it;k++){ tmp=boxBlur1D(tmp,w,h,r,true); tmp=boxBlur1D(tmp,w,h,r,false); }
-  return tmp;
-}
-function granularityMetrics(gray, width, height, cx, cy, r){
-  const L = new Float32Array(gray.length); for (let i=0;i<L.length;i++) L[i]=gray[i];
-  const b1=blur(L,width,height,1.5,1); // fino
-  const b2=blur(L,width,height,5,2);   // grueso
-  let E_f=0,E_c=0,area=0;
+/** =================== NUEVO — Huecos / Pinholes =================== */
+function drawHolesOverlay(gray, width, height, cx, cy, r){
+  const can = document.createElement("canvas");
+  can.width=width; can.height=height;
+  const ctx=can.getContext("2d");
+
+  let s=0,s2=0,c=0;
   for (let y=0;y<height;y++) for (let x=0;x<width;x++){
-    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r*r){ const i=y*width+x; const hf=L[i]-b1[i]; const lf=b1[i]-b2[i]; E_f += hf*hf; E_c += lf*lf; area++; }
+    const dx=x-cx, dy=y-cy; if(dx*dx+dy*dy<=r*r){
+      const g=gray[y*width+x]; s+=g; s2+=g*g; c++;
+    }
   }
-  E_f/=Math.max(area,1); E_c/=Math.max(area,1);
-  const BI = E_c/(E_f+1e-6); // bimodalidad
-  return { fines:E_f, coarse:E_c, bimodality:BI };
-}
-function headspaceRisk(m){
-  const depth = Math.max(0, m.ringDepth);
-  const pos = m.ringPos || 0;
-  const edge = m.edgeDensity || 0;
-  const extremes = m.extremes || 0;
-  const edgePos = clamp01((pos-0.9)/0.08);
-  const score = clamp01( 0.6*(depth/0.06)*edgePos + 0.25*edge*3 + 0.15*extremes*2 );
-  return score;
-}
-function corrPearson(a,b){
-  const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
-  for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
-  const cov=sxy/n - (sx/n)*(sy/n); const vx=sxx/n - (sx/n)*(sx/n); const vy=syy/n - (sy/n)*(sy/n);
-  const denom=Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12)); return denom>0? cov/denom : 0;
-}
-function alignSectorMeans(a,b,allowReverse=true){
-  const n=a.length; let best={corr:-2,shift:0,reversed:false,aligned:null};
-  const shiftArr=(arr,k)=>arr.map((_,i)=>arr[(i-k+n)%n]);
-  const variants=[{arr:b,reversed:false}]; if (allowReverse) variants.push({arr:[...b].reverse(),reversed:true});
-  for (const v of variants){ for (let k=0;k<n;k++){ const bb=shiftArr(v.arr,k); const c=corrPearson(a,bb); if (c>best.corr) best={corr:c,shift:k,reversed:v.reversed,aligned:bb}; } }
-  return best;
+  const mean=s/Math.max(c,1), std=Math.sqrt(Math.max(s2/Math.max(c,1)-mean*mean,1e-8));
+  const low=mean-1.6*std, high=mean+1.6*std;
+
+  const id=ctx.createImageData(width,height);
+  let holes=0;
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++){
+    const i=y*width+x; const dx=x-cx, dy=y-cy; const inside=(dx*dx+dy*dy<=r*r);
+    const p=i*4; if(!inside){ id.data[p+3]=0; continue; }
+    const g=gray[i];
+    if (g<low){ // huecos oscuros
+      id.data[p]=255; id.data[p+1]=200; id.data[p+2]=0; id.data[p+3]=220; holes++;
+    } else if (g>high){ // pinholes brillantes
+      id.data[p]=255; id.data[p+1]=255; id.data[p+2]=255; id.data[p+3]=200; holes++;
+    } else {
+      id.data[p+3]=0;
+    }
+  }
+  ctx.putImageData(id,0,0);
+
+  // leyenda
+  ctx.fillStyle="rgba(0,0,0,0.45)"; ctx.fillRect(8,8,240,40);
+  ctx.fillStyle="rgba(255,200,0,1)"; ctx.fillRect(12,14,14,14);
+  ctx.fillStyle="#fff"; ctx.font="12px ui-sans-serif"; ctx.fillText("huecos oscuros", 32, 25);
+  ctx.fillStyle="#fff"; ctx.fillRect(12,30,14,14);
+  ctx.fillStyle="#fff"; ctx.fillText("pinholes brillantes", 32, 41);
+
+  const pct = c? holes/c : 0;
+  return { can, holesPct: pct };
 }
 
-/** =================== Analysis (puck) =================== */
+/** =================== NUEVO — Manchas/Spots & Fingering =================== */
+// Segmentación de manchas (componentes conexos) y métricas de distribución.
+function analyzeSpots(gray, width, height, cx, cy, r){
+  // Umbral por cuantil + sigma
+  let vals=[]; vals.length=0;
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++){
+    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r*r) vals.push(gray[y*width+x]);
+  }
+  vals.sort((a,b)=>a-b);
+  const q20 = vals[Math.floor(vals.length*0.2)] || 0; // 20% más oscuro
+  const mean = vals.reduce((a,b)=>a+b,0)/Math.max(vals.length,1);
+  const std = Math.sqrt(Math.max(vals.reduce((a,b)=>a+(b-mean)*(b-mean),0)/Math.max(vals.length,1),1e-8));
+  const thr = Math.min(q20, mean - 0.7*std);
+
+  const bin = new Uint8Array(width*height);
+  for (let y=0;y<height;y++) for (let x=0;x<width;x++){
+    const dx=x-cx, dy=y-cy; const inside=(dx*dx+dy*dy<=r*r);
+    const i=y*width+x; bin[i] = inside && (gray[i] < thr) ? 1 : 0;
+  }
+
+  // BFS labeling
+  const label = new Int32Array(width*height); label.fill(-1);
+  const comps = [];
+  const qx=new Int32Array(width*height), qy=new Int32Array(width*height);
+  let curLabel=0;
+  const push=(arr,idx,val)=>arr[idx]=val;
+
+  for (let y=1;y<height-1;y++){
+    for (let x=1;x<width-1;x++){
+      const i=y*width+x;
+      if (!bin[i] || label[i]!==-1) continue;
+      // flood
+      let head=0, tail=0;
+      qx[tail]=x; qy[tail]=y; tail++;
+      label[i]=curLabel;
+      let area=0, pxSum=0, pySum=0, perim=0, minx=x, maxx=x, miny=y, maxy=y, rsum=0, rsumsq=0;
+      while(head<tail){
+        const xx=qx[head], yy=qy[head]; head++;
+        area++; pxSum+=xx; pySum+=yy;
+        const dx0=xx-cx, dy0=yy-cy; const rad=Math.hypot(dx0,dy0)/r; rsum+=rad; rsumsq+=rad*rad;
+        if (xx<minx) minx=xx; if (xx>maxx) maxx=xx; if (yy<miny) miny=yy; if (yy>maxy) maxy=yy;
+        // 4 vecinos
+        const neigh=[[1,0],[-1,0],[0,1],[0,-1]];
+        for (let k=0;k<4;k++){
+          const nx=xx+neigh[k][0], ny=yy+neigh[k][1];
+          const j=ny*width+nx;
+          if (!bin[j]){ perim++; continue; }
+          if (label[j]===-1){ label[j]=curLabel; qx[tail]=nx; qy[tail]=ny; tail++; }
+        }
+      }
+      const cxC=pxSum/area, cyC=pySum/area;
+      const ecc = (maxx-minx+1)/(maxy-miny+1); // relación de aspecto
+      const compactness = perim>0 ? (perim*perim)/(4*Math.PI*area) : 1; // >1 = alargado/irregular
+      const rMean = rsum/area, rStd = Math.sqrt(Math.max(rsumsq/area - rMean*rMean, 0));
+
+      comps.push({ area, perim, cx:cxC, cy:cyC, bbox:[minx,miny,maxx,maxy], ecc, compactness, rMean, rStd });
+      curLabel++;
+    }
+  }
+
+  const totalDisk = Math.PI*r*r;
+  const pixArea = 1; // aproximación
+  const spotsArea = comps.reduce((a,c)=>a+c.area*pixArea,0);
+  const spotsCount = comps.length;
+  const spotsAreaPct = totalDisk>0 ? spotsArea/totalDisk : 0;
+
+  // Cluster index: varianza de conteo por sectores (más var = más segregación angular)
+  const sectors = 24;
+  const counts = new Float64Array(sectors);
+  for (const c of comps){
+    const a=Math.atan2(c.cy-cy, c.cx-cx); let k=Math.floor(((a+Math.PI)/(2*Math.PI))*sectors); if (k<0) k=0; if (k>=sectors) k=sectors-1;
+    counts[k]+=c.area;
+  }
+  const meanC = counts.reduce((a,b)=>a+b,0)/sectors;
+  const varC = counts.reduce((a,b)=>a+(b-meanC)*(b-meanC),0)/sectors;
+  const clusterIndex = meanC>0 ? varC/(meanC*meanC+1e-6) : 0;
+
+  // Fingering: proporción de componentes alargados/irregulares en corona media-externa
+  let fingers=0, eligible=0;
+  for (const c of comps){
+    if (c.rMean>0.45){ // preferimos zona media-externa
+      eligible++;
+      if (c.compactness>1.6 || c.ecc>2.0) fingers++;
+    }
+  }
+  const fingeringIndex = eligible>0 ? fingers/eligible : 0;
+
+  // Overlay
+  const can = document.createElement("canvas");
+  can.width=width; can.height=height;
+  const ctx = can.getContext("2d");
+  ctx.strokeStyle="rgba(255,180,0,0.9)"; ctx.lineWidth=2;
+  comps.forEach(c=>{
+    ctx.beginPath();
+    ctx.rect(c.bbox[0]-0.5, c.bbox[1]-0.5, (c.bbox[2]-c.bbox[0])+1, (c.bbox[3]-c.bbox[1])+1);
+    ctx.stroke();
+    ctx.fillStyle="rgba(255,180,0,0.25)";
+    ctx.beginPath(); ctx.arc(c.cx, c.cy, 2.5, 0, Math.PI*2); ctx.fill();
+  });
+  // leyenda
+  ctx.fillStyle="rgba(0,0,0,0.45)"; ctx.fillRect(8,8,240,40);
+  ctx.fillStyle="#fff"; ctx.font="12px ui-sans-serif"; ctx.fillText("Manchas/Spots (contornos)", 12, 24);
+
+  return { can, spotsCount, spotsAreaPct, clusterIndex, fingeringIndex };
+}
+
+/** =================== Heurísticas extra =================== */
+function centerJetIndex(profile){
+  // centro más oscuro que zona media => índice > umbral
+  const c = avgBand(profile, 0.0, 0.18);
+  const mid = avgBand(profile, 0.45, 0.65);
+  // gris bajo = más oscuro; si c << mid, hay “mancha central”
+  return clamp01((mid - c) / (mid + 1e-6));
+}
+function edgeDarkIndex(profile){
+  const edge = avgBand(profile, 0.90, 0.99);
+  const mid = avgBand(profile, 0.45, 0.65);
+  return clamp01((mid - edge) / (mid + 1e-6)); // alto = borde más oscuro
+}
+function avgBand(profile, a, b){
+  const n=profile.length; const i0=Math.max(0, Math.floor(a*n)); const i1=Math.min(n-1, Math.floor(b*n));
+  let s=0,c=0; for (let i=i0;i<=i1;i++){ s+=profile[i]; c++; } return c? s/c : 0;
+}
+
+/** =================== Análisis (puck) =================== */
 async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
   const cid = cropped.getContext("2d").getImageData(0,0,cropped.width, cropped.height);
@@ -390,92 +489,99 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const profileChart = drawProfileChart(Array.from(stats.profile));
   const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
-  const gran = granularityMetrics(cg.gray, cg.width, cg.height, centerX, centerY, r);
-  const hsRisk = headspaceRisk({ ringDepth, ringPos: ring.pos, edgeDensity: edges.density, extremes: 0 }); // extremos se calcula abajo
+  // NUEVO: huecos/pinholes + manchas/fingering
+  const holes = drawHolesOverlay(cg.gray, cg.width, cg.height, centerX, centerY, r);
+  const spots = analyzeSpots(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
-  // extremos (pixeles fuera de 1σ) dentro del disco
-  let s=0,c=0;
-  for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-    const dx=x-centerX, dy=y-centerY;
-    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s+=g; c++; }
-  }
-  const mean=s/Math.max(c,1);
-  let s2=0; for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-    const dx=x-centerX, dy=y-centerY;
-    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; s2+=(g-mean)*(g-mean); }
-  }
-  const std=Math.sqrt(Math.max(s2/Math.max(c,1),1e-8));
-  const low=mean-1.0*std, high=mean+1.0*std; let ext=0;
-  for (let y=0;y<cg.height;y++) for (let x=0;x<cg.width;x++){
-    const dx=x-centerX, dy=y-centerY;
-    if (dx*dx+dy*dy<=r*r){ const g=cg.gray[y*cg.width+x]; if (g<low||g>high) ext++; }
-  }
-  const extremes = ext/Math.max(c,1);
+  // Índices de patrón
+  const idxCenter = centerJetIndex(stats.profile);
+  const idxEdgeDark = edgeDarkIndex(stats.profile);
 
-  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
+  // Heurística headspace (refinada)
+  const hsRisk = clamp01(
+    0.55 * clamp01(ringDepth/0.06) * clamp01((ring.pos-0.88)/0.08) +
+    0.25 * clamp01(edges.density*3) +
+    0.20 * clamp01(spots.clusterIndex*0.7 + idxEdgeDark)
+  );
+
+  const [croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL, holesURL, spotsURL] = await Promise.all([
     canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(edges.can),
     canvasToURL(sectors.can), canvasToURL(guides), canvasToURL(ringOverlay),
-    canvasToURL(profileChart), canvasToURL(histChart)
+    canvasToURL(profileChart), canvasToURL(histChart), canvasToURL(holes.can), canvasToURL(spots.can)
   ]);
 
   return {
     dim: { w: cropped.width, h: cropped.height, r: Math.round(r) },
-    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL },
+    urls: { croppedURL, hmURL, edgeURL, sectorURL, guideURL, ringURL, profileURL, histURL, holesURL, spotsURL },
     metrics: {
       eci: stats.eci,
-      extremes,
       sectorStd: sectors.std,
       edgeDensity: edges.density,
       ringDepth, ringPos: ring.pos,
-      granularity: gran,
       headspace: hsRisk,
+      spotsCount: spots.spotsCount,
+      spotsAreaPct: spots.spotsAreaPct,
+      clusterIndex: spots.clusterIndex,
+      fingeringIndex: spots.fingeringIndex,
+      idxCenter, idxEdgeDark
     },
     arrays: { sectorMeans: sectors.means, radialProfile: stats.profile },
     debug: { cx, cy, r }
   };
 }
 
-/** =================== Optional: Paper print (huella) =================== */
+/** =================== Análisis huella en papel (opcional) =================== */
 async function analyzePrintFromCircle(srcCanvas, cx, cy, r){
-  // Similar pipeline pero interpretando la mancha: más oscuro = más flujo (inversión)
   const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
   const id = cropped.getContext("2d").getImageData(0,0,cropped.width,cropped.height);
   const g = grayscale(id);
-  // invertir para que alto = más flujo
+  // invertir: más claro = más flujo
   const inv = new Float32Array(g.gray.length);
   for (let i=0;i<inv.length;i++) inv[i] = 1.0 - g.gray[i];
 
   const cx0=cropped.width/2, cy0=cropped.height/2;
-  // Stats angulares y radiales
+
   const ps = polarStats(inv, g.width, g.height, cx0, cy0, r);
   const lv = localVariance(inv, g.width, g.height, cx0, cy0, r, 64);
   const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, g.width, g.height);
   const sectors = drawSectorsOverlay(inv, g.width, g.height, cx0, cy0, r, 24);
   const guides = (()=>{ const can=document.createElement("canvas"); can.width=cropped.width; can.height=cropped.height; const ctx=can.getContext("2d"); ctx.strokeStyle="rgba(255,255,255,0.45)"; ctx.lineWidth=1.2; const rings=[0.3,0.6,0.9]; rings.forEach(t=>{ ctx.beginPath(); ctx.arc(cx0,cy0,r*t,0,Math.PI*2); ctx.stroke(); }); return can; })();
 
-  // canales: top-percentil sobre media
+  // canales por cuantil (top-25% de sectores)
   const means = sectors.means;
-  const mAvg = means.reduce((a,b)=>a+b,0)/means.length;
-  const chMask = means.map(v=> v > mAvg + sectors.std*0.8 ? 1 : 0);
+  const sorted = [...means].sort((a,b)=>b-a);
+  const cutoff = sorted[Math.floor(means.length*0.25)];
+  const chMask = means.map(v=> v >= cutoff ? 1 : 0);
   const channelPct = chMask.reduce((a,b)=>a+b,0)/chMask.length;
+
+  // pico de flujo en el borde (anillo de flujo)
+  const ringOverlay = drawRingOverlay(cropped.width, r, detectDarkRing(ps.profile.map(v=>1-v), [0.78,0.98]).pos, 0.06); // pos de máximo en inv
 
   const profileChart = drawProfileChart(Array.from(ps.profile));
   const histChart = drawHistogram(inv, g.width, g.height, cx0, cy0, r);
 
-  const [croppedURL, hmURL, sectorURL, guideURL, profileURL, histURL] = await Promise.all([
+  const [croppedURL, hmURL, sectorURL, guideURL, ringURL, profileURL, histURL] = await Promise.all([
     canvasToURL(cropped), canvasToURL(heatmap), canvasToURL(sectors.can),
-    canvasToURL(guides), canvasToURL(profileChart), canvasToURL(histChart)
+    canvasToURL(guides), canvasToURL(ringOverlay), canvasToURL(profileChart), canvasToURL(histChart)
   ]);
 
   return {
-    urls:{ croppedURL, hmURL, sectorURL, guideURL, profileURL, histURL },
+    urls:{ croppedURL, hmURL, sectorURL, guideURL, ringURL, profileURL, histURL },
     metrics:{
       channelPct,
       sectorStd: sectors.std,
-      radialEdgeBoost: ps.ringAvg(0.88,0.98) - ps.ringAvg(0.55,0.7) // borde vs medio
+      radialEdgeBoost: ps.ringAvg(0.88,0.98) - ps.ringAvg(0.55,0.7)
     },
     arrays:{ sectorMeans: sectors.means, radialProfile: ps.profile }
   };
+}
+
+/** =================== Correlaciones =================== */
+function corrPearson(a,b){
+  const n=Math.min(a.length,b.length); let sx=0,sy=0,sxx=0,syy=0,sxy=0;
+  for (let i=0;i<n;i++){ const x=a[i], y=b[i]; sx+=x; sy+=y; sxx+=x*x; syy+=y*y; sxy+=x*y; }
+  const cov=sxy/n - (sx/n)*(sy/n); const vx=sxx/n - (sx/n)*(sx/n); const vy=syy/n - (sy/n)*(sy/n);
+  const denom=Math.sqrt(Math.max(vx,1e-12)*Math.max(vy,1e-12)); return denom>0? cov/denom : 0;
 }
 
 /** =================== UI helpers =================== */
@@ -485,7 +591,7 @@ function Pill({children}){ return <span className="pill">{children}</span>; }
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true });
+  const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, holes:false, spots:true, sectors:false, ring:true });
   const [expanded, setExpanded] = useState(0);
 
   const topRef = useRef(); const bottomRef = useRef();
@@ -600,7 +706,7 @@ export default function App(){
       const top = await analyzeFromCircle(topCrop.srcCanvas, topCrop.cx, topCrop.cy, topCrop.r);
       const bottom = await analyzeFromCircle(bottomCrop.srcCanvas, bottomCrop.cx, bottomCrop.cy, bottomCrop.r);
 
-      // Optional prints
+      // Optional prints (huella en papel)
       let topPrint=null, bottomPrint=null;
       const fTopP = topPrintRef.current.files?.[0];
       const fBotP = bottomPrintRef.current.files?.[0];
@@ -617,111 +723,97 @@ export default function App(){
       const a = Array.from(top.arrays.sectorMeans);
       const b = Array.from(bottom.arrays.sectorMeans);
       const abCorr = (corrPearson(a,b)+1)/2;
-      const ringFlag = bottom.metrics.ringDepth>0.02 ? "anillo" : "—";
 
-      // Paper corroboration (if present)
-      let paperSummary=null;
-      if (topPrint || bottomPrint){
-        const tp = topPrint?.arrays?.sectorMeans || a;
-        const bp = bottomPrint?.arrays?.sectorMeans || b;
-        const ppCorr = (corrPearson(tp,bp)+1)/2;
-        paperSummary = {
-          topChPct: topPrint?.metrics?.channelPct ?? null,
-          botChPct: bottomPrint?.metrics?.channelPct ?? null,
-          ppCorr
-        };
-      }
-
-      // Build recommendations (Gagné/Rao heuristics codificadas)
-      const rec = buildRecommendations({top,bottom,abCorr,paperSummary});
+      // Construir recomendaciones específicas
+      const rec = buildRecommendations({top, bottom, abCorr, topPrint, bottomPrint});
 
       const setItem = {
         top, bottom, topPrint, bottomPrint, pair: { sectorCorr: abCorr },
         summary: {
-          eciTop: round(top.metrics.eci),
-          eciBot: round(bottom.metrics.eci),
           corr: Math.round(abCorr*100),
-          ring: ringFlag,
-          grind: round(top.metrics.granularity.bimodality)
+          edgeDark: round(bottom.metrics.idxEdgeDark),
+          centerJet: round(bottom.metrics.idxCenter),
+          spots: bottom.metrics.spotsCount
         },
         rec
       };
       setSets(prev=> [setItem, ...prev]);
       setExpanded(0);
-      // reset inputs for next run, but keep prints so user pueda reutilizar
       if (topRef.current) topRef.current.value=null;
       if (bottomRef.current) bottomRef.current.value=null;
       overrides.current={};
     } finally { setBusy(false); }
   }
 
-  function buildRecommendations(ctx){
-    const { top, bottom, abCorr, paperSummary } = ctx;
-    const lines = [];
-    const bullets = [];
+  function buildRecommendations({top, bottom, abCorr, topPrint, bottomPrint}){
+    const R = [];
+    const A = [];
 
-    const eciB = bottom.metrics.eci;
-    const ringDepth = bottom.metrics.ringDepth;
-    const sectors = bottom.metrics.sectorStd;
-    const edges = bottom.metrics.edgeDensity;
-    const extremes = bottom.metrics.extremes;
-    const grindBI = top.metrics.granularity?.bimodality ?? 0;
+    // --- Patrones clave cara inferior (salida) ---
+    const b = bottom.metrics;
+    const t = top.metrics;
 
-    // 1) Edge / ring issues (Rao: evitar anillo, distribución/tamp, headspace; Gagné: puck screen mejora uniformidad)
-    if (ringDepth > 0.03 && eciB > 0.02){
-      lines.push("Anillo oscuro pronunciado en la cara inferior con borde más oscuro que el centro.");
-      bullets.push("Baja dosis o usa cesta más alta para aumentar headspace; reduce densidad al borde.");
-      bullets.push("WDT fino hasta el borde y **no barrer** al final (riesgo de empujar finos al perímetro).");
-      bullets.push("Considera **puck screen** superior; ayuda a distribuir/pre-humedecer de forma más uniforme.");
-      bullets.push("Preinfusión suave (2–6 s) y rampa de presión gradual para no abrir canales periféricos.");
+    // 1) Borde oscurecido → headspace bajo / densidad periférica
+    if (b.idxEdgeDark > 0.35 && b.ringDepth > 0.02){
+      R.push("Borde más oscuro con anillo pronunciado en la cara inferior.");
+      A.push("Aumenta **headspace** (menos dosis o canasta más alta) y evita compactar el borde.");
+      A.push("Haz **WDT fino** hasta el borde pero sin barrer al final (no empujes finos hacia el perímetro).");
+      A.push("Usa **preinfusión** suave (2–6 s) y sube presión gradualmente.");
+      A.push("Considera **puck screen** superior o papel abajo si el anillo es persistente.");
     }
 
-    // 2) Angular variance / canales
-    if (sectors > 0.015){
-      lines.push("Alta desviación angular: hay sectores con caudal diferente (canales).");
-      bullets.push("Tras nivelar, WDT suave para igualar la densidad angular.");
-      bullets.push("Verifica la ducha y la distribución de caudal de la máquina (chorros desalineados amplifican sectores).");
-      bullets.push("Si usas papel, colócalo **sólo debajo** cuando el anillo sea persistente en inferior.");
+    // 2) Mancha central → ducha que moja más el centro (center jet)
+    if (b.idxCenter > 0.30){
+      R.push("Oscurecimiento/erosión en el centro (posible chorro central de la ducha).");
+      A.push("Limpia/inspecciona la **ducha** y su distribución; revisa que no haya obstrucciones laterales.");
+      A.push("Gira/recoloca la **pantalla/dispersion screen** y verifica homogeneidad del caudal.");
+      A.push("Aumenta **preinfusión** y reduce el pico de **caudal** inicial.");
+      A.push("El **puck screen** puede ayudar a repartir el agua y mitigar el chorro central.");
     }
 
-    // 3) Grietas y roturas
-    if (edges > 0.015 || extremes > 0.20){
-      lines.push("Evidencia de grietas/rupturas internas.");
-      bullets.push("Revisa **tamp**: presión recta, sin torsión ni golpecitos laterales.");
-      bullets.push("Si haces WDT agresivo, reduce profundidad o usa aguja más fina (0.3–0.4 mm).");
-      bullets.push("Revisa que el portafiltro no golpee la tolva al acoplar (microfracturas).");
+    // 3) Manchas segregadas + fingering
+    if (b.spotsCount >= 6 && (b.fingeringIndex > 0.25 || b.clusterIndex > 0.5)){
+      R.push("Manchas segregadas y patrón tipo ‘fingering’ (ramas/dedos) en la cama.");
+      A.push("Mejora la **humectación** inicial: preinfusión más larga y subida de presión más lenta.");
+      A.push("Ajusta **molienda** (ligeramente más fina) y refuerza **WDT** profundo pero suave.");
+      A.push("Reduce **estática** (RDT) para bajar grumos y finos sueltos.");
+      A.push("Si persiste, prueba **papel** abajo para estabilizar la superficie de salida.");
     }
 
-    // 4) Granulometría (fines + gruesos)
-    if (grindBI > 0.9){
-      lines.push("Señal de molienda bimodal (mucho fino y grueso).");
-      bullets.push("Cierra 1–2 clics y compensa con **ratio** o **shot time**; prioriza distribución suave.");
-      bullets.push("Si el café es muy fresco, aumenta **purga** y reduce estática para bajar finos.");
+    // 4) Grietas / roturas
+    if (b.edgeDensity > 0.012){
+      R.push("Indicios de grietas/roturas internas.");
+      A.push("Haz **tamp recto**, sin torsión ni golpecitos laterales; presión consistente.");
+      A.push("Evita golpes del portafiltro al acoplar; usa agujas **0.30–0.40 mm** y menos agresivas en WDT.");
     }
 
-    // 5) Correlación top/bottom
+    // 5) Huecos / pinholes
+    if ((b.spotsAreaPct > 0.02 && b.spotsCount>0) || (t && t.spotsAreaPct > 0.02)){
+      R.push("Huecos/pinholes visibles en la cama.");
+      A.push("Mejora **distribución** para rellenar microvacíos; reduce **estática** (RDT).");
+      A.push("Tamiza o purga para controlar finos; comprueba que no haya grumos en la tolva.");
+    }
+
+    // 6) Desacople entre caras
     if (abCorr < 0.55){
-      lines.push("Baja correlación entre caras: lo que entra no coincide con lo que sale.");
-      bullets.push("Refuerza nivelación y uniformidad antes del tamp (objetivo: ↑ correlación angular).");
+      R.push("Baja correlación entre cara superior e inferior (lo que entra ≠ lo que sale).");
+      A.push("Refuerza nivelación **antes** del tamp y busca homogeneidad angular (Rao spin suave).");
+      A.push("Modera el **pico de presión/caudal** al inicio para evitar caminos preferentes.");
     }
 
-    // 6) Papel corroboration
-    if (paperSummary){
-      const { topChPct, botChPct, ppCorr } = paperSummary;
-      if (ppCorr !== null && ppCorr < 0.55){
-        lines.push("La huella en papel no coincide entre caras; hay migraciones internas.");
-        bullets.push("Prueba **paper abajo** para sellar borde o cama, o reduce caudal inicial.");
-      }
-      if ((botChPct ?? 0) > 0.3){
-        lines.push("La huella inferior muestra concentración de canales (>30% de sectores rápidos).");
-        bullets.push("Revisa nivelación en perímetro y considera reducir presión pico.");
+    // 7) Huella papel (si disponible)
+    if (bottomPrint || topPrint){
+      const bp = bottomPrint?.metrics?.channelPct ?? 0;
+      if (bp > 0.3){
+        R.push("La huella inferior muestra concentración de canales (>30% sectores rápidos).");
+        A.push("Revisa **nivelación en perímetro** y considera reducir presión pico; papel abajo puede ayudar.");
       }
     }
 
-    if (lines.length===0) lines.push("Distribución razonablemente uniforme; ajustes finos posibles.");
-    if (bullets.length===0) bullets.push("Mantén WDT homogéneo, verifica headspace (2–6 mm) y evita sobre-compactar.");
+    if (R.length===0) R.push("Distribución razonablemente uniforme; ajustes finos posibles.");
+    if (A.length===0) A.push("Mantén WDT homogéneo, verifica headspace (2–6 mm) y evita sobre-compactar.");
 
-    return { lines, bullets };
+    return { lines:R, bullets:A };
   }
 
   return (
@@ -735,7 +827,7 @@ export default function App(){
           </div>
         </div>
         <div className="row">
-          {["heatmap","guides","edges","sectors","ring"].map(key=>(
+          {["heatmap","guides","edges","holes","spots","sectors","ring"].map(key=>(
             <label key={key} className="row small" style={{gap:8}}>
               <input type="checkbox" checked={overlay[key]} onChange={e=>setOverlay(o=>({...o, [key]:e.target.checked}))}/>
               <span>{key[0].toUpperCase()+key.slice(1)}</span>
@@ -759,12 +851,12 @@ export default function App(){
             <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("bottom")}>Ajustar recorte</button></div>
           </div>
           <div>
-            <div className="small">Huella en papel — Superior (opcional)</div>
+            <div className="small">Huella papel — Superior (opcional)</div>
             <input ref={topPrintRef} type="file" accept="image/*" />
             <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("topPrint")}>Ajustar recorte</button></div>
           </div>
           <div>
-            <div className="small">Huella en papel — Inferior (opcional)</div>
+            <div className="small">Huella papel — Inferior (opcional)</div>
             <input ref={bottomPrintRef} type="file" accept="image/*" />
             <div style={{marginTop:6}}><button className="btn" onClick={()=>openAdjust("bottomPrint")}>Ajustar recorte</button></div>
           </div>
@@ -796,10 +888,10 @@ export default function App(){
               <div className="accordion-summary" onClick={()=>setExpanded(isOpen? -1 : idx)}>
                 <div style={{fontWeight:700}}>Puck #{displayIndex}</div>
                 <div className="summary-metrics small">
-                  <Pill>ECI sup/inf: <span className="mono">{st.summary.eciTop}</span>/<span className="mono">{st.summary.eciBot}</span></Pill>
                   <Pill>Corr top/bot: <span className="mono">{st.summary.corr}%</span></Pill>
-                  <Pill>Granul.: <span className="mono">{st.summary.grind}</span></Pill>
-                  <Pill>Anillo: <span className="mono">{st.summary.ring}</span></Pill>
+                  <Pill>Edge dark: <span className="mono">{st.summary.edgeDark}</span></Pill>
+                  <Pill>Center jet: <span className="mono">{st.summary.centerJet}</span></Pill>
+                  <Pill>Spots: <span className="mono">{st.summary.spots}</span></Pill>
                 </div>
               </div>
 
@@ -814,18 +906,22 @@ export default function App(){
                           {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
                           {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
                           {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
+                          {overlay.holes && <img className="overlay" src={obj.it.urls.holesURL} alt="holes" />}
+                          {overlay.spots && <img className="overlay" src={obj.it.urls.spotsURL} alt="spots" />}
                           {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
                           {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
                         </div>
                         <div style={{height:8}} />
-                        <div className="metrics">
-                          <div>ECI: <span className="mono">{obj.it.metrics.eci.toFixed(3)}</span></div>
-                          <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
+                        <div className="metrics" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
                           <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
                           <div>Grietas: <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
                           <div>Anillo (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
                           <div>Headspace (riesgo): <span className="mono">{(obj.it.metrics.headspace*100).toFixed(0)}%</span></div>
-                          <div>Granul. BI: <span className="mono">{(obj.it.metrics.granularity?.bimodality||0).toFixed(2)}</span></div>
+                          <div>Spots#: <span className="mono">{obj.it.metrics.spotsCount}</span></div>
+                          <div>Spots área%: <span className="mono">{(obj.it.metrics.spotsAreaPct*100).toFixed(1)}%</span></div>
+                          <div>Cluster idx: <span className="mono">{obj.it.metrics.clusterIndex.toFixed(2)}</span></div>
+                          <div>Fingering idx: <span className="mono">{obj.it.metrics.fingeringIndex.toFixed(2)}</span></div>
+                          <div>CenterJet idx: <span className="mono">{obj.it.metrics.idxCenter.toFixed(2)}</span></div>
                         </div>
                         <div className="charts">
                           <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
@@ -847,6 +943,7 @@ export default function App(){
                                 {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
                                 {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
                                 {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                                {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
                               </div>
                               <div className="metrics" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
                                 <div>Canales%: <span className="mono">{(obj.it.metrics.channelPct*100).toFixed(0)}%</span></div>
@@ -866,7 +963,13 @@ export default function App(){
 
                   <div style={{marginTop:16}}>
                     <div style={{fontWeight:700, marginBottom:6}}>Recomendaciones</div>
-                    {ctxBlock(st.rec)}
+                    <ul style={{marginTop:0}}>
+                      {st.rec.lines.map((l,i)=><li key={i}>{l}</li>)}
+                    </ul>
+                    <div className="small muted" style={{margin:"6px 0"}}>Acciones sugeridas:</div>
+                    <ul>
+                      {st.rec.bullets.map((b,i)=><li key={i}>{b}</li>)}
+                    </ul>
                   </div>
                 </div>
               )}
@@ -876,18 +979,4 @@ export default function App(){
       </div>
     </div>
   );
-
-  function ctxBlock(rec){
-    return (
-      <div>
-        <ul style={{marginTop:0}}>
-          {rec.lines.map((l,i)=><li key={i}>{l}</li>)}
-        </ul>
-        <div className="small muted" style={{margin:"6px 0"}}>Acciones sugeridas:</div>
-        <ul>
-          {rec.bullets.map((b,i)=><li key={i}>{b}</li>)}
-        </ul>
-      </div>
-    );
-  }
 }
