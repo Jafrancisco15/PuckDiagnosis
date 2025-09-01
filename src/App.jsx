@@ -679,7 +679,7 @@ export default function App(){
     // 2) Angular variance / canales
     if (sectors > 0.015){
       lines.push("Alta desviación angular: hay sectores con caudal diferente (canales).");
-      bullets.push("Tras nivelar, **Rao spin** suave para igualar la densidad angular.");
+      bullets.push("WDT suave para igualar la densidad angular.");
       bullets.push("Verifica la **ducha** y la distribución de caudal de la máquina (chorros desalineados amplifican sectores).");
       bullets.push("Si usas papel, colócalo **sólo debajo** cuando el anillo sea persistente en inferior.");
     }
