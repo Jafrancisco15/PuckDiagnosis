@@ -388,119 +388,134 @@ function normalizeInsideDisk(arr,w,h,cx,cy,r, pLow=0.02, pHigh=0.98){
   return out;
 }
 function retinexNormalize(gray,w,h,cx,cy,r){
-  const sigma = Math.max(6, Math.round(Math.min(w,h)/14)); // campo amplio
+  const sigma = Math.max(6, Math.round(Math.min(w,h)/14));
   const bg = separableBlur(gray,w,h,sigma);
   const out = new Float32Array(gray.length);
   for (let i=0;i<gray.length;i++){
     out[i] = Math.log(gray[i]+1e-3) - Math.log(bg[i]+1e-3);
   }
-  // estira a [0,1] por percentiles dentro del disco
   return normalizeInsideDisk(out,w,h,cx,cy,r, 0.02, 0.98);
 }
 
-/* === RELIEVE: huecos (LoG-) y bultos (LoG+) multi-escala ============== */
-function detectRelief(grayRaw,w,h,cx,cy,r){
-  const gray = retinexNormalize(grayRaw,w,h,cx,cy,r);
+/* ===== Helper: overlay sombreado a partir de un “score” por pixel ===== */
+function shadedOverlayFromScore(score, w, h, cx, cy, r, rgb=[255,0,0], baseAlpha=0.45, pLow=0.97, pHigh=0.995){
+  const can = document.createElement("canvas");
+  can.width = w; can.height = h;
+  const ctx = can.getContext("2d");
+  const id = ctx.createImageData(w, h);
+
+  const vals = [];
+  const r2 = r*r;
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      const i=y*w+x;
+      const dx=x-cx, dy=y-cy;
+      if (dx*dx+dy*dy<=r2) vals.push(score[i]);
+    }
+  }
+  if (!vals.length){ ctx.putImageData(id,0,0); return { can, areaPct: 0 }; }
+
+  vals.sort((a,b)=>a-b);
+  const lo = vals[Math.max(0, Math.floor(vals.length*pLow))];
+  const hi = vals[Math.max(0, Math.floor(vals.length*pHigh))];
+  const denom = Math.max(hi - lo, 1e-9);
+
+  let Ainside=0, Aactive=0;
+  for (let y=0;y<h;y++){
+    for (let x=0;x<w;x++){
+      const i=y*w+x, p=4*i;
+      const dx=x-cx, dy=y-cy;
+      const inside = (dx*dx+dy*dy)<=r2;
+      if (inside) {
+        Ainside++;
+        const v = score[i];
+        const t = clamp01((v - lo) / denom);     // 0 → nada, 1 → muy fuerte
+        const a = Math.round(255 * baseAlpha * t);
+        if (a>0){
+          id.data[p]   = rgb[0];
+          id.data[p+1] = rgb[1];
+          id.data[p+2] = rgb[2];
+          id.data[p+3] = a;
+          Aactive++;
+        }
+      }
+    }
+  }
+  ctx.putImageData(id,0,0);
+  const areaPct = Ainside ? (Aactive / Ainside) : 0;
+  return { can, areaPct };
+}
+
+/* === RELIEVE: huecos (LoG−) y bultos (LoG+) con zonas sombreadas ===== */
+function detectRelief(grayRaw, w, h, cx, cy, r){
+  const gray = retinexNormalize(grayRaw, w, h, cx, cy, r);
   const sigmas = [1.0, 1.8, 3.0, 4.2];
-  const minResp = new Float32Array(w*h).fill(+Infinity); // más negativo
-  const maxResp = new Float32Array(w*h).fill(-Infinity); // más positivo
+  const minResp = new Float32Array(w*h).fill(+Infinity);
+  const maxResp = new Float32Array(w*h).fill(-Infinity);
+
   for (const s of sigmas){
-    const b = separableBlur(gray,w,h,s);
-    const lap = laplace3x3(b,w,h);
+    const b = separableBlur(gray, w, h, s);
+    const lap = laplace3x3(b, w, h);
     for (let i=0;i<lap.length;i++){
       if (lap[i] < minResp[i]) minResp[i] = lap[i];
       if (lap[i] > maxResp[i]) maxResp[i] = lap[i];
     }
   }
-  const r2=r*r;
-  const negVals=[]; const posVals=[];
-  for (let y=0;y<h;y++) for (let x=0;x<w;x++){
-    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r2){ negVals.push(-minResp[y*w+x]); posVals.push(maxResp[y*w+x]); }
+
+  const holeScore = new Float32Array(w*h);
+  const bumpScore = new Float32Array(w*h);
+  for (let i=0;i<holeScore.length;i++){
+    holeScore[i] = Math.max(0, -minResp[i]);   // cóncavo
+    bumpScore[i] = Math.max(0,  maxResp[i]);   // convexo
   }
-  const thrNeg = percentile(negVals, 0.985); // huecos
-  const thrPos = percentile(posVals, 0.985); // bultos
 
-  const canH = document.createElement("canvas"); canH.width=w; canH.height=h;
-  const canB = document.createElement("canvas"); canB.width=w; canB.height=h;
-  const idH = canH.getContext("2d").createImageData(w,h);
-  const idB = canB.getContext("2d").createImageData(w,h);
+  const holesOv = shadedOverlayFromScore(holeScore, w, h, cx, cy, r, [245,158,11], 0.42, 0.97, 0.995); // naranja
+  const bumpsOv = shadedOverlayFromScore(bumpScore, w, h, cx, cy, r, [34,211,238], 0.42, 0.97, 0.995); // cian
 
-  let holeArea=0, holeCount=0, bumpArea=0;
-  const mark = (id, x,y)=>{ const p=4*(y*w+x); id.data[p+3]=200; };
-
-  // binarios + ligera dilatación 3x3 para que se vean
-  for (let y=1;y<h-1;y++){
-    for (let x=1;x<w-1;x++){
-      const i=y*w+x; const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy>r2) continue;
-      if ((-minResp[i])>thrNeg){ holeArea++; holeCount++; for (let yy=y-1; yy<=y+1; yy++) for (let xx=x-1; xx<=x+1; xx++){ idH.data[4*(yy*w+xx)]   =255; idH.data[4*(yy*w+xx)+1]=180; idH.data[4*(yy*w+xx)+2]=0;   idH.data[4*(yy*w+xx)+3]=190; } }
-      if (maxResp[i]>thrPos){ bumpArea++; for (let yy=y-1; yy<=y+1; yy++) for (let xx=x-1; xx<=x+1; xx++){ idB.data[4*(yy*w+xx)]   =0;   idB.data[4*(yy*w+xx)+1]=220; idB.data[4*(yy*w+xx)+2]=220; idB.data[4*(yy*w+xx)+3]=190; } }
-    }
-  }
-  canH.getContext("2d").putImageData(idH,0,0);
-  canB.getContext("2d").putImageData(idB,0,0);
-
-  const diskArea = Math.PI*r*r;
   return {
-    holesCan: canH,
-    bumpsCan: canB,
-    holesAreaPct: diskArea? holeArea/diskArea : 0,
-    bumpsAreaPct: diskArea? bumpArea/diskArea : 0,
-    holesCount: holeCount
+    holesCan: holesOv.can,
+    bumpsCan: bumpsOv.can,
+    holesAreaPct: holesOv.areaPct,
+    bumpsAreaPct: bumpsOv.areaPct,
+    holesCount: Math.round(holesOv.areaPct * Math.PI * r * r / 200)
   };
 }
 
-/* === GRIETAS (Frangi-like + normalización previa) ===================== */
-function detectCracksHessian(grayRaw,w,h,cx,cy,r){
-  const gray = retinexNormalize(grayRaw,w,h,cx,cy,r);
+/* === GRIETAS (Frangi-like) con zonas sombreadas ====================== */
+function detectCracksHessian(grayRaw, w, h, cx, cy, r){
+  const gray = retinexNormalize(grayRaw, w, h, cx, cy, r);
   const sigmas=[0.8,1.4,2.2,3.2];
-  const r2=r*r, beta=0.5, c=0.30;
   const V = new Float32Array(w*h);
+
+  const r2 = r*r, beta=0.5, c=0.30;
   for (const s of sigmas){
-    const {dxx,dyy,dxy} = hessianAtScale(gray,w,h,s);
+    const {dxx,dyy,dxy} = hessianAtScale(gray, w, h, s);
     for (let y=1;y<h-1;y++){
       for (let x=1;x<w-1;x++){
-        const i=y*w+x; const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy>r2) continue;
+        const i=y*w+x;
+        const dx=x-cx, dy=y-cy;
+        if (dx*dx+dy*dy>r2) continue;
+
         const A=dxx[i], B=dxy[i], D=dyy[i];
         const tr = A + D;
         const disc = Math.sqrt(Math.max((A-D)*(A-D) + 4*B*B, 0));
         const l1 = 0.5*(tr - disc); // λ1 ≤ λ2
         const l2 = 0.5*(tr + disc);
-        if (l1 >= 0) continue; // líneas oscuras
+
+        if (l1 >= 0) continue; // buscamos líneas oscuras
         const Rb = Math.abs(l2) / (Math.abs(l1) + 1e-9);
         const S  = Math.hypot(l1,l2);
         const v = Math.exp(-(Rb*Rb)/(2*beta*beta)) * (1 - Math.exp(-(S*S)/(2*c*c)));
-        if (v > V[i]) V[i]=v;
+        if (v > V[i]) V[i] = v;
       }
     }
   }
-  const vals = collectInside(V,w,h,cx,cy,r);
-  const thr = percentile(vals, 0.985); // más sensible
-  const can=document.createElement("canvas"); can.width=w; can.height=h;
-  const ctx=can.getContext("2d"); const id=ctx.createImageData(w,h);
-  let L=0, Aarea=0;
-  for (let y=1;y<h-1;y++){
-    for (let x=1;x<w-1;x++){
-      const i=y*w+x, p=4*i; const dx=x-cx, dy=y-cy; const inside=dx*dx+dy*dy<=r2;
-      if (inside) Aarea++;
-      if (inside && V[i]>thr){
-        for (let yy=y-1; yy<=y+1; yy++){
-          for (let xx=x-1; xx<=x+1; xx++){
-            const k=yy*w+xx, pk=4*k, ddx=xx-cx, ddy=yy-cy;
-            if (ddx*ddx+ddy*ddy<=r2){
-              id.data[pk]=235; id.data[pk+1]=30; id.data[pk+2]=70; id.data[pk+3]=210;
-            }
-          }
-        }
-        L++;
-      }
-    }
-  }
-  ctx.putImageData(id,0,0);
-  const cracksPct = Aarea? L/Aarea : 0;
-  return { can, cracksPct };
+
+  const cracksOv = shadedOverlayFromScore(V, w, h, cx, cy, r, [239,68,68], 0.50, 0.97, 0.995); // rojo
+  return { can: cracksOv.can, cracksPct: cracksOv.areaPct };
 }
 
-/* ========= Granularidad y headspace (igual que antes) ================= */
+/* ========= Granularidad y headspace (como antes) ===================== */
 function boxBlur1D(arr, w, h, r, horiz){
   const out=new Float32Array(arr.length); const R=Math.max(1, Math.floor(r));
   if (horiz){
@@ -576,7 +591,7 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const stats = polarStats(cg.gray, cg.width, cg.height, centerX, centerY, r);
   const lv = localVariance(cg.gray, cg.width, cg.height, centerX, centerY, r, 64);
 
-  // Detectores mejorados (sobre gray normalizado internamente)
+  // Detectores (con retinex interno donde aplica)
   const edges = drawEdgesOverlay(retinexNormalize(cg.gray, cg.width, cg.height, centerX, centerY, r), cg.width, cg.height, centerX, centerY, r);
   const sectors = drawSectorsOverlay(retinexNormalize(cg.gray, cg.width, cg.height, centerX, centerY, r), cg.width, cg.height, centerX, centerY, r, 24);
   const heatmap = drawHeatmapCanvas(lv.varmap, lv.wBlocks, lv.hBlocks, lv.vmax, lv.bw, lv.bh, cg.width, cg.height);
@@ -589,7 +604,8 @@ async function analyzeFromCircle(srcCanvas, cx, cy, r){
   const profileChart = drawProfileChart(Array.from(stats.profile));
   const histChart = drawHistogram(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
-  const relief = detectRelief(cg.gray, cg.width, cg.height, centerX, centerY, r);   // NUEVO
+  // NUEVOS overlays sombreados
+  const relief = detectRelief(cg.gray, cg.width, cg.height, centerX, centerY, r);
   const cracks = detectCracksHessian(cg.gray, cg.width, cg.height, centerX, centerY, r);
 
   // extremos (z-score) dentro del disco
@@ -638,7 +654,6 @@ async function analyzePrintFromCircle(srcCanvas, cx, cy, r){
   const cropped = cropCircleFromCanvas(srcCanvas, cx, cy, r, 1.18);
   const id = cropped.getContext("2d").getImageData(0,0,cropped.width,cropped.height);
   const g = grayscale(id);
-  // invertir para que alto = más flujo
   const inv = new Float32Array(g.gray.length);
   for (let i=0;i<inv.length;i++) inv[i] = 1.0 - g.gray[i];
 
@@ -680,7 +695,6 @@ function Pill({children}){ return <span className="pill">{children}</span>; }
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  // toggles (añadimos Huecos/Bultos por separado)
   const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true, holes:true, bumps:false, cracks:true });
   const [expanded, setExpanded] = useState(0);
 
@@ -809,13 +823,11 @@ export default function App(){
         bottomPrint = await analyzePrintFromCircle(det.srcCanvas, det.cx, det.cy, det.r);
       }
 
-      // Pair correlation (no UI change)
       const a = Array.from(top.arrays.sectorMeans);
       const b = Array.from(bottom.arrays.sectorMeans);
       const abCorr = (corrPearson(a,b)+1)/2;
       const ringFlag = bottom.metrics.ringDepth>0.02 ? "anillo" : "—";
 
-      // Paper corroboration (if present)
       let paperSummary=null;
       if (topPrint || bottomPrint){
         const tp = topPrint?.arrays?.sectorMeans || a;
@@ -854,7 +866,6 @@ export default function App(){
     const lines = [];
     const bullets = [];
 
-    // Relieve
     if (bottom.metrics.holesDepthAreaPct > 0.010){
       lines.push("Depresiones/huecos visibles en la cara inferior.");
       bullets.push("Canasta moderna y tamper base plana auto-nivelante (>6 kg, sin golpes).");
@@ -867,46 +878,39 @@ export default function App(){
       bullets.push("Preinfusión más suave y evita rampas bruscas.");
     }
 
-    // Grietas
     if (bottom.metrics.cracksPct > 0.006 || top.metrics.cracksPct > 0.006){
       lines.push("Grietas lineales detectadas.");
       bullets.push("Evita golpes al acoplar y descargas de presión bruscas.");
       bullets.push("Tamp recto/constante; WDT menos profundo si usas agujas finas.");
     }
 
-    // Anillo / headspace
     if (bottom.metrics.ringDepth > 0.03 && bottom.metrics.eci > 0.02){
       lines.push("Anillo oscuro pronunciado (borde subextraído).");
       bullets.push("Más headspace (baja dosis o cesta más alta) y WDT hasta el borde sin barrer finos al perímetro.");
       bullets.push("Prueba puck-screen arriba y preinfusión 2–6 s.");
     }
 
-    // Angularidad / canales
     if (bottom.metrics.sectorStd > 0.015){
       lines.push("Alta desviación angular: sectores con caudal distinto.");
       bullets.push("Nivelación/WDT homogéneos; revisa ducha o caídas asimétricas.");
       bullets.push("Si persiste, papel sólo abajo para homogeneizar.");
     }
 
-    // Bordes/extremos
     if (bottom.metrics.edgeDensity > 0.015 || bottom.metrics.extremes > 0.20){
       lines.push("Zonas muy tensas o roturas internas.");
       bullets.push("Evita torsión en el tamp y picos de presión.");
     }
 
-    // Granulometría
     if ((top.metrics.granularity?.bimodality ?? 0) > 0.9){
       lines.push("Molienda bimodal (mucho fino y grueso).");
       bullets.push("Cierra 1–2 clics y distribuye mejor; controla estática para reducir finos.");
     }
 
-    // Correlación top/bot
     if (abCorr < 0.55){
       lines.push("Baja correlación entre caras.");
       bullets.push("Refuerza nivelación; objetivo: ↑ correlación angular.");
     }
 
-    // Huella (si hay)
     if (paperSummary){
       const { topChPct, botChPct, ppCorr } = paperSummary;
       if (ppCorr !== null && ppCorr < 0.55){
