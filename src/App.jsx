@@ -1,32 +1,3 @@
-Skip to content
-Navigation Menu
-Jafrancisco15
-PuckDiagnosis
-
-Type / to search
-Code
-Issues
-Pull requests
-Actions
-Projects
-Wiki
-Security
-Insights
-Settings
-PuckDiagnosis/src
-/App.jsx
-Go to file
-t
-Jafrancisco15
-Jafrancisco15
-Add files via upload
-f572538
- · 
-2 days ago
-
-Code
-
-Blame
 import React, { useEffect, useRef, useState } from "react";
 import { jsPDF } from "jspdf";
 
