@@ -953,3 +953,88 @@ export default function App(){
                       <div key={k}>
                         <div className="small" style={{fontWeight:700, marginBottom:6}}>{obj.lab}</div>
                         <div className="thumb canvas-stack">
+                          <img src={obj.it.urls.croppedURL} alt={obj.lab} />
+                          {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
+                          {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                          {overlay.edges && <img className="overlay" src={obj.it.urls.edgeURL} alt="edges" />}
+                          {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                          {overlay.ring && <img className="overlay" src={obj.it.urls.ringURL} alt="ring" />}
+                          {overlay.cracks && <img className="overlay" src={obj.it.urls.cracksURL} alt="cracks" />}
+                          {overlay.pits && <img className="overlay" src={obj.it.urls.pitsURL} alt="pits" />}
+                        </div>
+                        <div style={{height:8}} />
+                        <div className="metrics">
+                          <div>ECI: <span className="mono">{obj.it.metrics.eci.toFixed(3)}</span></div>
+                          <div>Extremos: <span className="mono">{(obj.it.metrics.extremes*100).toFixed(1)}%</span></div>
+                          <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                          <div>Grietas (pix): <span className="mono">{(obj.it.metrics.edgeDensity*100).toFixed(2)}%</span></div>
+                          <div>Anillo (prof.): <span className="mono">{obj.it.metrics.ringDepth.toFixed(3)}</span></div>
+                          <div>Headspace (riesgo): <span className="mono">{(obj.it.metrics.headspace*100).toFixed(0)}%</span></div>
+                          <div>Granul. BI: <span className="mono">{(obj.it.metrics.granularity?.bimodality||0).toFixed(2)}</span></div>
+                          <div>Z grietas: <span className="mono">{(obj.it.metrics.crackArea*100).toFixed(2)}%</span> (<span className="mono">{obj.it.metrics.crackCount}</span>)</div>
+                          <div>Z huecos: <span className="mono">{(obj.it.metrics.pitArea*100).toFixed(2)}%</span> (<span className="mono">{obj.it.metrics.pitCount}</span>)</div>
+                        </div>
+                        <div className="charts">
+                          <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                          <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+
+                  {(st.topPrint || st.bottomPrint) && (
+                    <div style={{marginTop:16}}>
+                      <div style={{fontWeight:700, marginBottom:6}}>Huella en papel (opcional)</div>
+                      <div className="grid" style={{gridTemplateColumns:"1fr 1fr", gap:16}}>
+                        {[{lab:"Huella superior", it: st.topPrint}, {lab:"Huella inferior", it: st.bottomPrint}].map((obj, k)=>(
+                          obj.it ? (
+                            <div key={k}>
+                              <div className="thumb canvas-stack">
+                                <img src={obj.it.urls.croppedURL} alt={obj.lab} />
+                                {overlay.heatmap && <img className="overlay" src={obj.it.urls.hmURL} alt="heatmap" />}
+                                {overlay.sectors && <img className="overlay" src={obj.it.urls.sectorURL} alt="sectors" />}
+                                {overlay.guides && <img className="overlay" src={obj.it.urls.guideURL} alt="guides" />}
+                              </div>
+                              <div className="metrics" style={{gridTemplateColumns:"repeat(3,1fr)"}}>
+                                <div>Canales%: <span className="mono">{(obj.it.metrics.channelPct*100).toFixed(0)}%</span></div>
+                                <div>σ sectores: <span className="mono">{obj.it.metrics.sectorStd.toFixed(3)}</span></div>
+                                <div>Borde-medio: <span className="mono">{obj.it.metrics.radialEdgeBoost.toFixed(3)}</span></div>
+                              </div>
+                              <div className="charts">
+                                <div className="chart"><img src={obj.it.urls.profileURL} alt="perfil radial" /></div>
+                                <div className="chart"><img src={obj.it.urls.histURL} alt="histograma" /></div>
+                              </div>
+                            </div>
+                          ) : <div key={k} className="muted small">({obj.lab} no cargada)</div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div style={{marginTop:16}}>
+                    <div style={{fontWeight:700, marginBottom:6}}>Recomendaciones</div>
+                    {ctxBlock(st.rec)}
+                  </div>
+                </div>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+
+  function ctxBlock(rec){
+    return (
+      <div>
+        <ul style={{marginTop:0}}>
+          {rec.lines.map((l,i)=><li key={i}>{l}</li>)}
+        </ul>
+        <div className="small muted" style={{margin:"6px 0"}}>Acciones sugeridas:</div>
+        <ul>
+          {rec.bullets.map((b,i)=><li key={i}>{b}</li>)}
+        </ul>
+      </div>
+    );
+  }
+}
