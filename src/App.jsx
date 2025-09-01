@@ -1,5 +1,4 @@
 import React, { useEffect, useRef, useState } from "react";
-import { jsPDF } from "jspdf";
 
 /** =================== Utils =================== */
 const MAX_DIM = 1200;
@@ -10,7 +9,8 @@ const round = n => Math.round(n*1000)/1000;
 
 async function fileToImageBitmap(file) {
   const blobURL = URL.createObjectURL(file);
-  const img = await createImageBitmap(await fetch(blobURL).then(r=>r.blob()));
+  const blob = await fetch(blobURL).then(r=>r.blob());
+  const img = await createImageBitmap(blob);
   URL.revokeObjectURL(blobURL);
   return img;
 }
@@ -303,7 +303,7 @@ function drawHistogram(gray, width, height, cx, cy, r){
 }
 async function canvasToURL(can){ const b=await new Promise(res=>can.toBlob(res,"image/png")); return URL.createObjectURL(b); }
 
-/* ========= NUEVO: filtros/derivadas para huecos y grietas ========= */
+/* ========= Filtros/derivadas base ========= */
 function gaussianKernel1D(sigma){
   const r = Math.max(1, Math.round(3*sigma));
   const k = new Float32Array(2*r+1);
@@ -352,112 +352,133 @@ function laplace3x3(gray,w,h){
   }
   return out;
 }
-function detectDepthHoles(gray,w,h,cx,cy,r){
-  const sigmas = [1.2, 2.0, 3.0];
-  const inside = (x,y)=>{ const dx=x-cx, dy=y-cy; return dx*dx+dy*dy<=r*r; };
 
-  const responses = sigmas.map(s=>{
-    const b = separableBlur(gray,w,h,s);
-    return laplace3x3(b,w,h);
-  });
-
-  const respMin = new Float32Array(w*h);
-  for (let i=0;i<w*h;i++){
-    let m=Infinity;
-    for (let s=0;s<responses.length;s++) m = Math.min(m, responses[s][i]);
-    respMin[i]=m; // blobs oscuros → negativo
+/* === Helpers NUEVOS para detectores ==================== */
+function collectInside(arr, w, h, cx, cy, r){
+  const vals=[]; const r2=r*r;
+  for (let y=0;y<h;y++) for (let x=0;x<w;x++){
+    const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy<=r2) vals.push(arr[y*w+x]);
   }
-
-  let S=0,S2=0,C=0;
-  for (let y=0;y<h;y++) for (let x=0;x<w;x++){ if(!inside(x,y)) continue;
-    const v=respMin[y*w+x]; S+=v; S2+=v*v; C++;
-  }
-  const mean=S/C, std=Math.sqrt(Math.max(S2/C - mean*mean,1e-8));
-  const thr = mean - 1.5*std;
-
-  const used = new Uint8Array(w*h);
-  const comps=[];
-  const can=document.createElement("canvas"); can.width=w; can.height=h;
-  const ctx=can.getContext("2d");
-  const id=ctx.createImageData(w,h);
-
-  for (let y=1;y<h-1;y++){
-    for (let x=1;x<w-1;x++){
-      const i=y*w+x;
-      if (used[i] || !inside(x,y) || !(respMin[i] < thr)) continue;
-      // BFS
-      const qx=[x], qy=[y]; used[i]=1;
-      let area=0, minx=x,maxx=x,miny=y,maxy=y;
-      while(qx.length){
-        const xx=qx.pop(), yy=qy.pop();
-        const j=yy*w+xx; area++;
-        if (xx<minx)minx=xx; if(xx>maxx)maxx=xx; if(yy<miny)miny=yy; if(yy>maxy)maxy=yy;
-        const n4=[[1,0],[-1,0],[0,1],[0,-1]];
-        for (const [dx,dy] of n4){
-          const nx=xx+dx, ny=yy+dy, k=ny*w+nx;
-          if (nx<1||nx>=w-1||ny<1||ny>=h-1) continue;
-          if (!inside(nx,ny) || used[k]) continue;
-          if (respMin[k] < thr){ used[k]=1; qx.push(nx); qy.push(ny); }
-        }
-      }
-      comps.push({area, bbox:[minx,miny,maxx,maxy]});
-      for (let yy=miny;yy<=maxy;yy++){
-        for (let xx=minx;xx<=maxx;xx++){
-          const k=yy*w+xx; if (!inside(xx,yy)) continue;
-          if (respMin[k] < thr){
-            const p=4*k; id.data[p]=255; id.data[p+1]=180; id.data[p+2]=0; id.data[p+3]=190;
-          }
-        }
-      }
-    }
-  }
-  ctx.putImageData(id,0,0);
-
-  const diskArea = Math.PI*r*r;
-  const holesArea = comps.reduce((a,c)=>a+c.area,0);
-  return { can, holesDepthCount: comps.length, holesDepthAreaPct: diskArea? holesArea/diskArea : 0 };
+  return vals;
 }
-function detectCracksHessian(gray,w,h,cx,cy,r){
-  const g = separableBlur(gray,w,h,1.2);
-  const inside = (x,y)=>{ const dx=x-cx, dy=y-cy; return dx*dx+dy*dy<=r*r; };
+function percentile(vals, p){
+  if (!vals.length) return 0;
+  const a = [...vals].sort((u,v)=>u-v);
+  const i = Math.min(a.length-1, Math.max(0, Math.round((a.length-1)*p)));
+  return a[i];
+}
+function hessianAtScale(gray,w,h,sigma){
+  const b = separableBlur(gray,w,h,sigma);
+  const s2 = sigma*sigma;
   const dxx = new Float32Array(w*h), dyy=new Float32Array(w*h), dxy=new Float32Array(w*h);
   for (let y=1;y<h-1;y++){
     for (let x=1;x<w-1;x++){
       const p=y*w+x;
-      dxx[p] = g[p-1] - 2*g[p] + g[p+1];
-      dyy[p] = g[p-w] - 2*g[p] + g[p+w];
-      dxy[p] = (g[p+w+1] - g[p+w-1] - g[p-w+1] + g[p-w-1]) * 0.25;
+      dxx[p] = (b[p-1] - 2*b[p] + b[p+1]) * s2;
+      dyy[p] = (b[p-w] - 2*b[p] + b[p+w]) * s2;
+      dxy[p] = (b[p+w+1] - b[p+w-1] - b[p-w+1] + b[p-w-1]) * 0.25 * s2;
     }
   }
-  const ridge = new Float32Array(w*h);
-  let S=0,S2=0,C=0;
+  return { dxx, dyy, dxy };
+}
+
+/* === HUECOS / DEPRESIONES (LoG + percentil) ====================== */
+function detectDepthHoles(gray,w,h,cx,cy,r){
+  const sigmas = [1.2, 2.0, 3.0];
+  const respMin = new Float32Array(w*h).fill(Infinity);
+  for (const s of sigmas){
+    const b = separableBlur(gray,w,h,s);
+    const lap = laplace3x3(b,w,h);
+    for (let i=0;i<respMin.length;i++) if (lap[i] < respMin[i]) respMin[i] = lap[i];
+  }
+  const inv = new Float32Array(w*h);
+  for (let i=0;i<inv.length;i++) inv[i] = -respMin[i];
+  const vals = collectInside(inv,w,h,cx,cy,r);
+  const thr = percentile(vals, 0.985);
+  const r2=r*r;
+
+  const used = new Uint8Array(w*h);
+  const can = document.createElement("canvas"); can.width=w; can.height=h;
+  const ctx = can.getContext("2d"); const id = ctx.createImageData(w,h);
+  const comps=[]; const minArea = Math.max(20, Math.round(0.002*r*r));
+
   for (let y=1;y<h-1;y++){
     for (let x=1;x<w-1;x++){
-      if (!inside(x,y)) continue;
-      const p=y*w+x;
-      const A=dxx[p], B=dxy[p], D=dyy[p];
-      const tr = A + D;
-      const disc = Math.sqrt(Math.max((A-D)*(A-D) + 4*B*B, 0));
-      const l1 = 0.5*(tr - disc);      // λ1 ≤ λ2
-      const l2 = 0.5*(tr + disc);
-      const score = (-l1) * (Math.abs(l1) > 1.5*Math.abs(l2) ? 1 : 0); // línea oscura
-      ridge[p]=Math.max(0, score);
-      S+=ridge[p]; S2+=ridge[p]*ridge[p]; C++;
+      const i=y*w+x; const dx=x-cx, dy=y-cy;
+      if (used[i] || dx*dx+dy*dy>r2 || !(inv[i] > thr)) continue;
+      // BFS
+      let area=0, qx=[x], qy=[y]; used[i]=1;
+      while(qx.length){
+        const xx=qx.pop(), yy=qy.pop();
+        const j=yy*w+xx; area++;
+        const n8=[[-1,-1],[0,-1],[1,-1],[-1,0],[1,0],[-1,1],[0,1],[1,1]];
+        for (const [dx2,dy2] of n8){
+          const nx=xx+dx2, ny=yy+dy2, k=ny*w+nx;
+          if (nx<1||nx>=w-1||ny<1||ny>=h-1) continue;
+          const ddx=nx-cx, ddy=ny-cy;
+          if (used[k] || ddx*ddx+ddy*ddy>r2) continue;
+          if (inv[k] > thr){ used[k]=1; qx.push(nx); qy.push(ny); }
+        }
+      }
+      if (area < minArea) continue;
+      comps.push(area);
+      // dilatación ligera para visibilidad
+      for (let yy=y-1; yy<=y+1; yy++) for (let xx=x-1; xx<=x+1; xx++){
+        const k=yy*w+xx, p=4*k, ddx=xx-cx, ddy=yy-cy;
+        if (ddx*ddx+ddy*ddy<=r2 && inv[k]>thr){ id.data[p]=255; id.data[p+1]=180; id.data[p+2]=0; id.data[p+3]=190; }
+      }
     }
   }
-  const mean=S/Math.max(C,1), std=Math.sqrt(Math.max(S2/Math.max(C,1)-mean*mean,1e-8));
-  const thr = mean + 1.0*std;
+  ctx.putImageData(id,0,0);
+  const diskArea = Math.PI*r*r;
+  const holesArea = comps.reduce((a,c)=>a+c,0);
+  return { can, holesDepthCount: comps.length, holesDepthAreaPct: diskArea? holesArea/diskArea : 0 };
+}
 
+/* === GRIETAS (Frangi-like vesselness + percentil) =================== */
+function detectCracksHessian(gray,w,h,cx,cy,r){
+  const sigmas=[0.8,1.4,2.2,3.2];
+  const r2=r*r, beta=0.5, c=0.30;
+  const V = new Float32Array(w*h);
+  for (const s of sigmas){
+    const {dxx,dyy,dxy} = hessianAtScale(gray,w,h,s);
+    for (let y=1;y<h-1;y++){
+      for (let x=1;x<w-1;x++){
+        const i=y*w+x; const dx=x-cx, dy=y-cy; if (dx*dx+dy*dy>r2) continue;
+        const A=dxx[i], B=dxy[i], D=dyy[i];
+        const tr = A + D;
+        const disc = Math.sqrt(Math.max((A-D)*(A-D) + 4*B*B, 0));
+        const l1 = 0.5*(tr - disc); // λ1 ≤ λ2
+        const l2 = 0.5*(tr + disc);
+        if (l1 >= 0) continue; // líneas oscuras
+        const Rb = Math.abs(l2) / (Math.abs(l1) + 1e-9);
+        const S  = Math.hypot(l1,l2);
+        const v = Math.exp(-(Rb*Rb)/(2*beta*beta)) * (1 - Math.exp(-(S*S)/(2*c*c)));
+        if (v > V[i]) V[i]=v;
+      }
+    }
+  }
+  const vals = collectInside(V,w,h,cx,cy,r);
+  const thr = percentile(vals, 0.990);
   const can=document.createElement("canvas"); can.width=w; can.height=h;
   const ctx=can.getContext("2d"); const id=ctx.createImageData(w,h);
   let L=0, Aarea=0;
-  for (let y=0;y<h;y++){
-    for (let x=0;x<w;x++){
-      const i=y*w+x, p=4*i; const insidePix=inside(x,y);
-      if (insidePix) Aarea++;
-      if (insidePix && ridge[i]>thr){
-        id.data[p]=235; id.data[p+1]=30; id.data[p+2]=70; id.data[p+3]=210; L++;
-      } else id.data[p+3]=0;
+  for (let y=1;y<h-1;y++){
+    for (let x=1;x<w-1;x++){
+      const i=y*w+x, p=4*i; const dx=x-cx, dy=y-cy; const inside=dx*dx+dy*dy<=r2;
+      if (inside) Aarea++;
+      if (inside && V[i]>thr){
+        // dilatación 3x3 para visibilidad
+        for (let yy=y-1; yy<=y+1; yy++){
+          for (let xx=x-1; xx<=x+1; xx++){
+            const k=yy*w+xx, pk=4*k, ddx=xx-cx, ddy=yy-cy;
+            if (ddx*ddx+ddy*ddy<=r2){
+              id.data[pk]=235; id.data[pk+1]=30; id.data[pk+2]=70; id.data[pk+3]=210;
+            }
+          }
+        }
+        L++;
+      }
     }
   }
   ctx.putImageData(id,0,0);
@@ -658,7 +679,7 @@ function Pill({children}){ return <span className="pill">{children}</span>; }
 export default function App(){
   const [sets, setSets] = useState([]);
   const [busy, setBusy] = useState(false);
-  // NUEVOS toggles: depth (huecos) y cracks (grietas)
+  // toggles
   const [overlay, setOverlay] = useState({ heatmap:false, guides:true, edges:true, sectors:false, ring:true, depth:true, cracks:true });
   const [expanded, setExpanded] = useState(0);
 
@@ -840,11 +861,11 @@ export default function App(){
     const extremes = bottom.metrics.extremes;
     const grindBI = top.metrics.granularity?.bimodality ?? 0;
 
-    // — Huecos / depresiones (inferior normalmente)
+    // — Huecos / depresiones
     if (bottom.metrics.holesDepthAreaPct > 0.010 || bottom.metrics.holesDepthCount >= 3){
       lines.push("Depresiones/huecos visibles en la cara inferior.");
       bullets.push("Canasta moderna y tamper base plana auto-nivelante (>6 kg, sin golpes).");
-      bullets.push("WDT suave para asentar en capa plana; evita crear cavidades.");
+      bullets.push("WDT suave para asentar en capa plana; evita cavidades.");
       bullets.push("Considera papel bajo el puck para estabilizar la salida y sellar microhuecos.");
     }
 
@@ -856,12 +877,12 @@ export default function App(){
       bullets.push("Comprueba la descarga de presión al final del tiro (puede abrir grietas).");
     }
 
-    // 1) Edge / ring issues (Rao/Gagné)
+    // 1) Edge / ring issues
     if (ringDepth > 0.03 && eciB > 0.02){
       lines.push("Anillo oscuro pronunciado (borde más subextraído que el centro).");
       bullets.push("Aumenta headspace (dosis menor o cesta más alta) y evita barrer finos al borde.");
       bullets.push("WDT fino hasta el borde, sin arrastrar hacia el perímetro.");
-      bullets.push("Prueba **puck screen** superior y preinfusión suave (2–6 s).");
+      bullets.push("Prueba puck screen superior y preinfusión suave (2–6 s).");
     }
 
     // 2) Variación angular / canales
@@ -878,7 +899,7 @@ export default function App(){
       bullets.push("Reduce estática/picos de finos con purga y limpieza.");
     }
 
-    // 4) Granulometría (fines + gruesos)
+    // 4) Granulometría
     if (grindBI > 0.9){
       lines.push("Molienda bimodal (mucho fino y grueso).");
       bullets.push("Cierra 1–2 clics y ajusta ratio/tiempo; prioriza distribución uniforme.");
@@ -891,7 +912,7 @@ export default function App(){
       bullets.push("Refuerza nivelación antes del tamp; objetivo: ↑ correlación angular.");
     }
 
-    // 6) Huella en papel (si hay)
+    // 6) Huella (si hay)
     if (paperSummary){
       const { topChPct, botChPct, ppCorr } = paperSummary;
       if (ppCorr !== null && ppCorr < 0.55){
@@ -899,7 +920,7 @@ export default function App(){
         bullets.push("Prueba papel abajo o reduce caudal inicial.");
       }
       if ((botChPct ?? 0) > 0.3){
-        lines.push("Huella inferior con concentración de canales (>30% de sectores rápidos).");
+        lines.push("Huella inferior con concentración de canales (>30% sectores rápidos).");
         bullets.push("Revisa nivelación en perímetro y reduce presión pico.");
       }
     }
@@ -916,7 +937,7 @@ export default function App(){
         <div>
           <h1 style={{margin:"0 0 6px 0"}}>Puck Diagnosis</h1>
           <div className="muted">
-            Sube <b>dos fotos por puck</b>: <span className="tag">Superior = lado ducha</span> <span className="tag">Inferior = lado canasta</span>.
+            Sube <b>dos fotos por puck</b>: <span className="tag">Superior = lado ducha</span> <span className="tag">Inferior = lado canasta</span>.{" "}
             <span className="tag">Opcional: huella en papel (superior/inferior)</span>
           </div>
         </div>
